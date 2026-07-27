@@ -1,4 +1,4 @@
-.PHONY: help build test lint lint-fix fmt fmt-check tidy tidy-check check clean
+.PHONY: help build test cli-proof lint lint-fix fmt fmt-check tidy tidy-check check verify clean
 
 BUILD_DIR   := build
 BINARY      := $(BUILD_DIR)/gibson
@@ -20,6 +20,28 @@ build: ## Build Gibson into ./build/gibson.
 
 test: ## Run tests with the race detector.
 	go test -race $(PKG)
+
+cli-proof: ## Build and verify the compiled CLI contract.
+	@$(MAKE) --no-print-directory build VERSION=cli-proof
+	@set -eu; \
+	test -x "$(BINARY)"; \
+	root_help="$$($(BINARY) --help)"; \
+	printf '%s\n' "$$root_help" | grep -Eq '^[[:space:]]+serve[[:space:]]'; \
+	version="$$($(BINARY) --version)"; \
+	test "$$version" = "gibson version cli-proof"; \
+	serve_help="$$($(BINARY) serve --help)"; \
+	printf '%s\n' "$$serve_help" | grep -Fq -- '--port'; \
+	printf '%s\n' "$$serve_help" | grep -Fq -- '--dev'; \
+	if error_output="$$($(BINARY) serve unexpected 2>&1)"; then \
+		echo "expected positional arguments to fail" >&2; \
+		exit 1; \
+	else \
+		error_rc=$$?; \
+	fi; \
+	test "$$error_rc" -eq 1; \
+	test "$$(printf '%s\n' "$$error_output" | wc -l | tr -d ' ')" -eq 1; \
+	case "$$error_output" in 'gibson: error: '*) ;; *) echo "missing process error prefix" >&2; exit 1;; esac; \
+	printf '%s\n' 'GIBSON_CLI_PROOF=PASS'
 
 lint: ## Run golangci-lint.
 	golangci-lint run $(PKG)
@@ -49,6 +71,8 @@ tidy-check: ## Fail if go mod tidy would change dependency metadata.
 	echo "go mod tidy failed (rc=$$rc)"; exit $$rc
 
 check: fmt-check tidy-check lint test ## Run all non-mutating checks.
+
+verify: check cli-proof ## Run the complete local and CI verification gate.
 
 clean: ## Remove build artifacts, coverage files, and test cache.
 	rm -rf $(BUILD_DIR) coverage.out coverage.html *.coverprofile

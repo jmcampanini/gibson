@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -26,7 +25,7 @@ func TestServeCommandPassesOptionsToApplication(t *testing.T) {
 	assert.True(t, got.Dev)
 }
 
-func TestServeCommandLeavesPortOverrideUnset(t *testing.T) {
+func TestServeCommandUsesProductionDefaults(t *testing.T) {
 	var got app.ServeOptions
 	command := newServeCommand(func(_ context.Context, options app.ServeOptions) error {
 		got = options
@@ -35,6 +34,7 @@ func TestServeCommandLeavesPortOverrideUnset(t *testing.T) {
 
 	require.NoError(t, command.Execute())
 	assert.Nil(t, got.PortOverride)
+	assert.False(t, got.Dev)
 }
 
 func TestServeCommandPreservesZeroPortOverride(t *testing.T) {
@@ -50,17 +50,14 @@ func TestServeCommandPreservesZeroPortOverride(t *testing.T) {
 	assert.Zero(t, *got.PortOverride)
 }
 
-func TestServeHelp(t *testing.T) {
+func TestServeCommandRejectsPositionalArguments(t *testing.T) {
+	called := false
 	command := newServeCommand(func(context.Context, app.ServeOptions) error {
-		t.Fatal("serve called while rendering help")
+		called = true
 		return nil
 	})
-	var output bytes.Buffer
-	command.SetOut(&output)
-	command.SetErr(&output)
-	command.SetArgs([]string{"--help"})
+	command.SetArgs([]string{"unexpected"})
 
-	require.NoError(t, command.Execute())
-	assert.Contains(t, output.String(), "--port")
-	assert.Contains(t, output.String(), "--dev")
+	require.Error(t, command.Execute())
+	assert.False(t, called)
 }
