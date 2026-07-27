@@ -17,7 +17,6 @@ import (
 
 	"charm.land/log/v2"
 	"github.com/jmcampanini/gibson/internal/pisession"
-	"github.com/jmcampanini/gibson/internal/store"
 	"github.com/jmcampanini/gibson/internal/testws"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -114,11 +113,7 @@ future_setting = true
 	requireHealth(t, listener.Addr(), "warnings-test")
 	output := logs.String()
 	warnings := []string{
-		"unknown configuration keys",
-		"server.future_setting",
 		"no session types configured",
-		".gibson/ is not ignored",
-		"add .gibson/",
 		"pi version has not been verified with Gibson",
 		"found=0.83.0",
 	}
@@ -128,6 +123,8 @@ future_setting = true
 		assert.Contains(t, output, warning)
 		assert.Less(t, strings.Index(output, warning), startupAt)
 	}
+	assert.NotContains(t, output, "unknown configuration keys")
+	assert.NotContains(t, output, ".gibson/ is not ignored")
 
 	cancel()
 	requireServeStops(t, result)
@@ -206,7 +203,6 @@ func testServeDependencies() serveDependencies {
 	return serveDependencies{
 		assets:         readyAssets,
 		listen:         net.Listen,
-		checkIgnored:   store.CheckIgnored,
 		resolvePiBin:   pisession.ResolvePiBin,
 		checkPiVersion: pisession.CheckPiVersion,
 	}

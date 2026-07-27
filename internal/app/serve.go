@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/jmcampanini/gibson/internal/config"
 	"github.com/jmcampanini/gibson/internal/httpapi"
 	"github.com/jmcampanini/gibson/internal/pisession"
-	"github.com/jmcampanini/gibson/internal/store"
 	"github.com/jmcampanini/gibson/internal/workspace"
 	"github.com/jmcampanini/gibson/web"
 )
@@ -38,7 +36,6 @@ type serveDependencies struct {
 	assets         fs.FS
 	getwd          func() (string, error)
 	listen         func(network, address string) (net.Listener, error)
-	checkIgnored   func(checkoutRoot string) (bool, error)
 	resolvePiBin   func(configured string) (string, error)
 	checkPiVersion func(context.Context, string) (pisession.VersionResult, error)
 }
@@ -48,7 +45,6 @@ func Serve(ctx context.Context, options ServeOptions, logger *log.Logger) error 
 		assets:         web.Dist,
 		getwd:          os.Getwd,
 		listen:         net.Listen,
-		checkIgnored:   store.CheckIgnored,
 		resolvePiBin:   pisession.ResolvePiBin,
 		checkPiVersion: pisession.CheckPiVersion,
 	})
@@ -69,29 +65,18 @@ func serve(ctx context.Context, options ServeOptions, logger *log.Logger, depend
 		return err
 	}
 
-	loaded, err := config.Load(ws.LaunchCheckout)
+	cfg, err := config.Load(ws.LaunchCheckout)
 	if err != nil {
 		return err
 	}
-	cfg := loaded.Config
 
 	port := cfg.Server.Port
 	if options.PortOverride != nil {
 		port = *options.PortOverride
 	}
 
-	if len(loaded.UnknownKeys) > 0 {
-		logger.Warn("unknown configuration keys", "keys", strings.Join(loaded.UnknownKeys, ", "))
-	}
 	if len(cfg.Sessions) == 0 {
 		logger.Warn("no session types configured", "config", filepath.Join(ws.LaunchCheckout, "gibson.toml"))
-	}
-	ignored, err := dependencies.checkIgnored(ws.LaunchCheckout)
-	if err != nil {
-		return err
-	}
-	if !ignored {
-		logger.Warn(".gibson/ is not ignored", "fix", "add .gibson/ to "+filepath.Join(ws.LaunchCheckout, ".gitignore"))
 	}
 
 	piBin, err := dependencies.resolvePiBin(cfg.Server.PiBin)

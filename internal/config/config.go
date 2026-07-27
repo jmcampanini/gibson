@@ -18,11 +18,6 @@ type Config struct {
 	Sessions map[string]SessionType `toml:"sessions"`
 }
 
-type LoadResult struct {
-	Config      Config
-	UnknownKeys []string
-}
-
 type Server struct {
 	Port  int    `toml:"port"`
 	Bind  string `toml:"bind"`
@@ -36,35 +31,29 @@ type SessionType struct {
 	ExtraArgs   []string `toml:"extra_args"`
 }
 
-func Load(checkoutRoot string) (LoadResult, error) {
+func Load(checkoutRoot string) (Config, error) {
 	path := filepath.Join(checkoutRoot, "gibson.toml")
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return LoadResult{}, fmt.Errorf("gibson.toml not found at %s", path)
+			return Config{}, fmt.Errorf("gibson.toml not found at %s", path)
 		}
-		return LoadResult{}, fmt.Errorf("read gibson.toml at %s: %w", path, err)
+		return Config{}, fmt.Errorf("read gibson.toml at %s: %w", path, err)
 	}
 
 	cfg := Config{Sessions: make(map[string]SessionType)}
 	metadata, err := toml.Decode(string(contents), &cfg)
 	if err != nil {
-		return LoadResult{}, fmt.Errorf("gibson.toml: %w", err)
+		return Config{}, fmt.Errorf("gibson.toml: %w", err)
 	}
 	if cfg.Server.Bind == "" {
 		cfg.Server.Bind = defaultBind
 	}
 	if err := cfg.validate(metadata.IsDefined("server", "port")); err != nil {
-		return LoadResult{}, err
+		return Config{}, err
 	}
 
-	unknownKeys := make([]string, 0, len(metadata.Undecoded()))
-	for _, key := range metadata.Undecoded() {
-		unknownKeys = append(unknownKeys, key.String())
-	}
-	sort.Strings(unknownKeys)
-
-	return LoadResult{Config: cfg, UnknownKeys: unknownKeys}, nil
+	return cfg, nil
 }
 
 func (c Config) Validate() error {
