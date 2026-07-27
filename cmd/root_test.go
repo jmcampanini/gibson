@@ -1,15 +1,18 @@
 package cmd
 
 import (
+	"context"
 	"testing"
 
+	"github.com/jmcampanini/gibson/internal/app"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestRootCommand(t *testing.T) {
-	first := newRootCommand()
-	second := newRootCommand()
+	serveStub := func(context.Context, app.ServeOptions) error { return nil }
+	first := newRootCommand(serveStub)
+	second := newRootCommand(serveStub)
 
 	assert.NotSame(t, first, second)
 	assert.Equal(t, "gibson", first.Use)

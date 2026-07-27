@@ -10,6 +10,10 @@ This ledger records design deviations discovered while implementing M0. The exis
 - We changed the binary output from `bin/gibson` to `build/gibson` to match Command K and Overlay conventions.
 - We deferred the functional `make web` target until the web project exists in Checkpoint 2.
 - We bootstrap `go:embed` with a sibling sentinel rather than a tracked file inside generated `web/dist/`.
+- We use Charm Log v2 for structured operational output instead of `log/slog`.
+- We treat pi 0.82 as a minimum verified minor line rather than rejecting all newer versions.
+- We accept unknown configuration keys without startup diagnostics.
+- We do not inspect `.gitignore` coverage at runtime.
 - We will reconcile these differences with the existing plans after M0 is complete.
 
 ## D-001 — Application orchestration
@@ -65,10 +69,10 @@ This ledger records design deviations discovered while implementing M0. The exis
 ## D-007 — Configuration load result
 
 - **Planned design:** `config.Load(checkoutRoot)` returns `(*Config, toml.MetaData, error)` so startup can inspect undecoded keys immediately.
-- **M0 decision:** Checkpoint 2 returns `(Config, error)`, the complete result needed by its production-serving consumer. Unknown-key reporting remains in Checkpoint 3.
-- **Reason:** This avoids exposing decoder metadata before warning behavior has a consumer or settled application contract.
-- **Potential downstream impact:** Checkpoint 3 may extend the load result or add a focused diagnostics API when it implements unknown-key warnings.
-- **Reconciliation:** Revisit the planned signature after startup diagnostics are working.
+- **M0 decision:** Return `(Config, error)` and accept unknown keys without reporting them.
+- **Reason:** Owner review favored the smaller direct-loading API and did not require unknown-key startup diagnostics.
+- **Potential downstream impact:** Misspelled or obsolete configuration fields are ignored. Future layered configuration work must establish its own diagnostic policy if needed.
+- **Reconciliation:** Revisit config diagnostics after M0 is complete.
 
 ## D-008 — HTTP server inputs
 
@@ -77,3 +81,27 @@ This ledger records design deviations discovered while implementing M0. The exis
 - **Reason:** Configuration and workspace discovery belong to `internal/app`, while the development proxy is deferred to Checkpoint 4. Returning readiness errors prevents a production server from starting without its shell.
 - **Potential downstream impact:** Later checkpoints will add only concrete HTTP dependencies as their routes and development mode arrive.
 - **Reconciliation:** Revisit the planned options shape after M0 exposes all of its HTTP modes.
+
+## D-009 — Operational logging library
+
+- **Planned design:** Use the standard library's `log/slog` for structured server logs.
+- **M0 decision:** Use `charm.land/log/v2` directly with an injected text logger for startup information and warnings.
+- **Reason:** Charm Log retains structured key-value output while providing the preferred human-facing local CLI presentation.
+- **Potential downstream impact:** Later application workflows should receive the same logger rather than introduce a second logging system.
+- **Reconciliation:** Revisit the logging convention after M0 is complete.
+
+## D-010 — Pi compatibility policy
+
+- **Planned design:** Accept only version strings beginning with `0.82.` and fail every other version.
+- **M0 decision:** Require pi 0.82.0 or newer, treat the 0.82 minor line as verified, and warn without blocking when a newer version is installed.
+- **Reason:** The runtime check should fail fast for an environment below Gibson's tested baseline, not lock upgrades to one feature line. Newer versions remain visible until real integration tests verify them.
+- **Potential downstream impact:** Real-pi verification in later milestones determines when another minor line becomes verified or a known-incompatible range must be rejected.
+- **Reconciliation:** Revisit the supported-version convention after M0 is complete.
+
+## D-011 — Runtime Git-ignore check
+
+- **Planned design:** Startup checks whether the launch checkout's committed `.gitignore` covers `.gibson/` and warns with the required entry when it does not.
+- **M0 decision:** Do not inspect or report `.gitignore` coverage at runtime.
+- **Reason:** Owner review chose to keep repository hygiene outside the server startup contract.
+- **Potential downstream impact:** Missing coverage is discovered through normal Git status rather than a Gibson warning. Later plans that depend on this startup check require reconciliation.
+- **Reconciliation:** Revisit repository initialization and hygiene after M0 is complete.

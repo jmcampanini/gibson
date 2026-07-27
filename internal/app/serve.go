@@ -8,11 +8,15 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
+	"charm.land/log/v2"
 	"github.com/jmcampanini/gibson/internal/config"
 	"github.com/jmcampanini/gibson/internal/httpapi"
+	"github.com/jmcampanini/gibson/internal/pisession"
 	"github.com/jmcampanini/gibson/internal/workspace"
 	"github.com/jmcampanini/gibson/web"
 )
@@ -29,20 +33,24 @@ type ServeOptions struct {
 }
 
 type serveDependencies struct {
-	assets fs.FS
-	getwd  func() (string, error)
-	listen func(network, address string) (net.Listener, error)
+	assets         fs.FS
+	getwd          func() (string, error)
+	listen         func(network, address string) (net.Listener, error)
+	resolvePiBin   func(configured string) (string, error)
+	checkPiVersion func(context.Context, string) (pisession.VersionResult, error)
 }
 
-func Serve(ctx context.Context, options ServeOptions) error {
-	return serve(ctx, options, serveDependencies{
-		assets: web.Dist,
-		getwd:  os.Getwd,
-		listen: net.Listen,
+func Serve(ctx context.Context, options ServeOptions, logger *log.Logger) error {
+	return serve(ctx, options, logger, serveDependencies{
+		assets:         web.Dist,
+		getwd:          os.Getwd,
+		listen:         net.Listen,
+		resolvePiBin:   pisession.ResolvePiBin,
+		checkPiVersion: pisession.CheckPiVersion,
 	})
 }
 
-func serve(ctx context.Context, options ServeOptions, dependencies serveDependencies) error {
+func serve(ctx context.Context, options ServeOptions, logger *log.Logger, dependencies serveDependencies) error {
 	if options.Dev {
 		return errors.New("development serving is not available yet")
 	}
@@ -67,21 +75,45 @@ func serve(ctx context.Context, options ServeOptions, dependencies serveDependen
 		port = *options.PortOverride
 	}
 
+	if len(cfg.Sessions) == 0 {
+		logger.Warn("no session types configured", "config", filepath.Join(ws.LaunchCheckout, "gibson.toml"))
+	}
+
+	piBin, err := dependencies.resolvePiBin(cfg.Server.PiBin)
+	if err != nil {
+		return err
+	}
+	piVersion, err := dependencies.checkPiVersion(ctx, piBin)
+	if err != nil {
+		return err
+	}
+	if !piVersion.Verified {
+		logger.Warn(
+			"pi version has not been verified with Gibson",
+			"found", piVersion.Found,
+			"verified", fmt.Sprintf("0.%d.x", pisession.VerifiedPiMinor),
+			"minimum", pisession.MinimumPiVersion,
+		)
+	}
+
 	static, err := fs.Sub(dependencies.assets, "dist")
 	if err != nil {
-		return fmt.Errorf("load embedded web assets: %w", err)
+		return embeddedAssetsError(err)
 	}
 	handler, err := httpapi.New(httpapi.Options{
 		StaticFS: static,
 		Version:  options.Version,
 	})
 	if err != nil {
-		return err
+		return embeddedAssetsError(err)
 	}
 
 	address := net.JoinHostPort(cfg.Server.Bind, strconv.Itoa(port))
 	listener, err := dependencies.listen("tcp", address)
 	if err != nil {
+		if errors.Is(err, syscall.EADDRINUSE) {
+			return fmt.Errorf("listen on %s: port is already in use; change server.port in gibson.toml or pass --port: %w", address, err)
+		}
 		return fmt.Errorf("listen on %s: %w", address, err)
 	}
 	defer func() { _ = listener.Close() }()
@@ -89,7 +121,20 @@ func serve(ctx context.Context, options ServeOptions, dependencies serveDependen
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
+		ErrorLog: logger.StandardLog(log.StandardLogOptions{
+			ForceLevel: log.ErrorLevel,
+		}),
 	}
+	logger.Print("Gibson is serving at " + browserURL(cfg.Server.Bind, listener.Addr()))
+	logger.Info(
+		"server started",
+		"workspace", ws.Root,
+		"checkout", ws.LaunchCheckout,
+		"url", serverURL(cfg.Server.Bind, listener.Addr()),
+		"bind", serverAddress(cfg.Server.Bind, listener.Addr()),
+		"dev", options.Dev,
+		"pi_version", piVersion.Found,
+	)
 	serveResult := make(chan error, 1)
 	go func() {
 		serveResult <- server.Serve(listener)
@@ -112,4 +157,30 @@ func serve(ctx context.Context, options ServeOptions, dependencies serveDependen
 		}
 		return nil
 	}
+}
+
+func embeddedAssetsError(err error) error {
+	return fmt.Errorf("embedded web assets are not ready; rebuild with 'make build': %w", err)
+}
+
+func browserURL(bind string, address net.Addr) string {
+	switch bind {
+	case "0.0.0.0":
+		bind = "127.0.0.1"
+	case "::":
+		bind = "::1"
+	}
+	return serverURL(bind, address)
+}
+
+func serverURL(bind string, address net.Addr) string {
+	return "http://" + serverAddress(bind, address)
+}
+
+func serverAddress(bind string, address net.Addr) string {
+	_, port, err := net.SplitHostPort(address.String())
+	if err != nil {
+		return address.String()
+	}
+	return net.JoinHostPort(bind, port)
 }
