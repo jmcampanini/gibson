@@ -14,11 +14,12 @@ This ledger records design deviations discovered while implementing M0. The exis
 - We treat pi 0.82 as a minimum verified minor line rather than rejecting all newer versions.
 - We accept unknown configuration keys without startup diagnostics.
 - We do not inspect `.gitignore` coverage at runtime.
+- We keep configuration validation inside `Load` rather than exporting an unused `Config.Validate` method.
 - We will reconcile these differences with the existing plans after M0 is complete.
 
 ## Checkpoint 5 evaluation
 
-The complete ledger was audited against the integrated M0 implementation. D-001 through D-006 and D-008 through D-010 accurately describe the working design and are accepted for M0. Owner evaluation explicitly accepted D-007's silent handling of unknown configuration keys and D-011's omission of runtime Git-ignore inspection. Plan and convention changes remain deferred to the separate post-acceptance reconciliation pass.
+The complete ledger was audited against the integrated M0 implementation. D-001 through D-006 and D-008 through D-010 accurately describe the working design and are accepted for M0. Owner evaluation explicitly accepted D-007's silent handling of unknown configuration keys, D-011's omission of runtime Git-ignore inspection, and D-012's removal of the unused exported validation method. Plan and convention changes remain deferred to the separate post-acceptance reconciliation pass.
 
 ## D-001 — Application orchestration
 
@@ -109,3 +110,11 @@ The complete ledger was audited against the integrated M0 implementation. D-001 
 - **Reason:** Owner review chose to keep repository hygiene outside the server startup contract.
 - **Potential downstream impact:** Missing coverage is discovered through normal Git status rather than a Gibson warning. Later plans that depend on this startup check require reconciliation.
 - **Reconciliation:** Revisit repository initialization and hygiene after M0 is complete.
+
+## D-012 — Configuration validation entry point
+
+- **Planned design:** `Config.Validate() error` is an exported validation seam named by `PLAN_M0.md`, `PLAN_M1.md`, `PLAN_M7.md`, and `PLAN_CONVENTIONS.md`.
+- **M0 decision:** `Load` validates before returning a `Config`; there is no separate exported validation method.
+- **Reason:** The method had no production consumer and duplicated the loader's mandatory validation path, so retaining it would preserve a speculative API solely for future plans.
+- **Potential downstream impact:** Plans that name `Validate` must depend on `Load`'s validated result or establish a concrete need for separately validating programmatically constructed configuration.
+- **Reconciliation:** Revisit the downstream configuration seam after M0 is complete.
