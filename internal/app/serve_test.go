@@ -72,10 +72,13 @@ description = "Test session"
 
 	requireHealth(t, listener.Addr(), "test-version")
 	output := logs.String()
+	address := "127.0.0.1:" + listenerPort(t, listener.Addr())
+	assert.Contains(t, output, "Gibson is serving at http://"+address)
 	assert.Contains(t, output, "server started")
 	assert.Contains(t, output, "workspace="+ws.Root)
 	assert.Contains(t, output, "checkout="+ws.Checkout)
-	assert.Contains(t, output, "url=http://127.0.0.1:"+listenerPort(t, listener.Addr()))
+	assert.Contains(t, output, "url=http://"+address)
+	assert.Contains(t, output, "bind="+address)
 	assert.Contains(t, output, "dev=false")
 	assert.Contains(t, output, "pi_version=0.82.1")
 
@@ -179,6 +182,24 @@ description = "Test session"
 	assert.Contains(t, err.Error(), "already in use")
 	assert.Contains(t, err.Error(), "server.port")
 	assert.Contains(t, err.Error(), "--port")
+}
+
+func TestBrowserURLUsesReachableLoopbackForWildcardBinds(t *testing.T) {
+	t.Parallel()
+	address := &net.TCPAddr{IP: net.IPv6unspecified, Port: 7311}
+	tests := map[string]string{
+		"0.0.0.0":   "http://127.0.0.1:7311",
+		"::":        "http://[::1]:7311",
+		"127.0.0.1": "http://127.0.0.1:7311",
+		"10.0.0.7":  "http://10.0.0.7:7311",
+	}
+
+	for bind, want := range tests {
+		t.Run(bind, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, want, browserURL(bind, address))
+		})
+	}
 }
 
 func testServeDependencies() serveDependencies {

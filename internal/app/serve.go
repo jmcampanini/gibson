@@ -140,11 +140,13 @@ func serve(ctx context.Context, options ServeOptions, logger *log.Logger, depend
 			ForceLevel: log.ErrorLevel,
 		}),
 	}
+	logger.Print("Gibson is serving at " + browserURL(cfg.Server.Bind, listener.Addr()))
 	logger.Info(
 		"server started",
 		"workspace", ws.Root,
 		"checkout", ws.LaunchCheckout,
 		"url", serverURL(cfg.Server.Bind, listener.Addr()),
+		"bind", serverAddress(cfg.Server.Bind, listener.Addr()),
 		"dev", options.Dev,
 		"pi_version", piVersion.Found,
 	)
@@ -176,13 +178,24 @@ func embeddedAssetsError(err error) error {
 	return fmt.Errorf("embedded web assets are not ready; rebuild with 'make build': %w", err)
 }
 
+func browserURL(bind string, address net.Addr) string {
+	switch bind {
+	case "0.0.0.0":
+		bind = "127.0.0.1"
+	case "::":
+		bind = "::1"
+	}
+	return serverURL(bind, address)
+}
+
 func serverURL(bind string, address net.Addr) string {
-	port := ""
-	if _, found, err := net.SplitHostPort(address.String()); err == nil {
-		port = found
+	return "http://" + serverAddress(bind, address)
+}
+
+func serverAddress(bind string, address net.Addr) string {
+	_, port, err := net.SplitHostPort(address.String())
+	if err != nil {
+		return address.String()
 	}
-	if port == "" {
-		return "http://" + address.String()
-	}
-	return "http://" + net.JoinHostPort(bind, port)
+	return net.JoinHostPort(bind, port)
 }
