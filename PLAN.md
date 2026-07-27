@@ -8,6 +8,10 @@ its implementation into reviewable chunks without changing its scope.
 ## How we will work
 
 - Complete one chunk at a time, in order.
+- Create each chunk branch from `feature/m1` and target its PR back to `feature/m1`; do
+  not stack a later chunk on an unmerged chunk branch.
+- Merge `feature/m1` into the default branch only after every chunk PR has landed and M1
+  has passed its final approval gate.
 - Keep the repository green at every chunk boundary.
 - At each approval gate, present what now works, meaningful decisions or deviations,
   verification evidence, and remaining concerns.
