@@ -1,6 +1,6 @@
 # MILESTONE_4 — Full conversation rendering
 
-Conforms to [PLAN_CONVENTIONS.md](PLAN_CONVENTIONS.md) (cited below as CONV §n). SPEC.md is
+Conforms to [MILESTONE_CONVENTIONS.md](MILESTONE_CONVENTIONS.md) (cited below as CONV §n). SPEC.md is
 normative (cited as SPEC §n). pi RPC facts below are taken from the installed pi docs:
 `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (cited as rpc.md)
 and `docs/session-format.md` (cited as session-format.md), pi v0.82.1.

@@ -1,7 +1,7 @@
 # MILESTONE_1 — Headless session core (pi over RPC, no HTTP)
 
 Implementation plan for MILESTONES.md M1. SPEC.md is normative for behavior;
-PLAN_CONVENTIONS.md is binding (cited as "conventions §N"). Pi protocol facts below are
+MILESTONE_CONVENTIONS.md is binding (cited as "conventions §N"). Pi protocol facts below are
 taken from the docs shipped with verified pi version 0.82.1
 (`~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md`,
 `session-format.md`, `sessions.md`) — implementers should re-read `rpc.md` before writing

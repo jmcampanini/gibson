@@ -1,7 +1,7 @@
 # MILESTONE_3 — Minimal browser chat
 
 Implements MILESTONES.md **M3** exactly. Normative behavior: [SPEC.md](SPEC.md).
-Binding seams: [PLAN_CONVENTIONS.md](PLAN_CONVENTIONS.md) (cited below as CONV §n).
+Binding seams: [MILESTONE_CONVENTIONS.md](MILESTONE_CONVENTIONS.md) (cited below as CONV §n).
 Rationale reference: [BACKGROUND.md](BACKGROUND.md). This plan adds no server code paths
 beyond what prior milestones deliver; M3 is the browser layer over M2's frozen
 HTTP contract.

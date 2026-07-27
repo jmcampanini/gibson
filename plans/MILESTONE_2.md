@@ -1,7 +1,7 @@
 # MILESTONE_2 — Curl-drivable HTTP API
 
 Implements MILESTONES.md M2 exactly. Governing documents: SPEC.md (normative behavior),
-PLAN_CONVENTIONS.md (binding, cited as CONV §n), pi's RPC reference at
+MILESTONE_CONVENTIONS.md (binding, cited as CONV §n), pi's RPC reference at
 `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (cited as rpc.md),
 and `session-format.md` in the same directory for the JSONL file layout. Read all four
 before implementing.

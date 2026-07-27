@@ -1,4 +1,4 @@
-# PLAN_CONVENTIONS
+# MILESTONE_CONVENTIONS
 
 Binding conventions for the remaining milestone plans (`MILESTONE_1.md` … `MILESTONE_7.md`),
 including the seams established by the current implementation. SPEC.md is normative for

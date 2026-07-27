@@ -1,6 +1,6 @@
 # MILESTONE_5 — Extension dialogs and surfaces
 
-Conforms to [PLAN_CONVENTIONS.md](PLAN_CONVENTIONS.md) (all §-references to "conventions"
+Conforms to [MILESTONE_CONVENTIONS.md](MILESTONE_CONVENTIONS.md) (all §-references to "conventions"
 mean that file; "SPEC" means [SPEC.md](SPEC.md)). Scope is exactly MILESTONES.md M5.
 
 ---

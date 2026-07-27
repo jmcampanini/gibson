@@ -1,6 +1,6 @@
 # MILESTONE_7 — v1 hardening and full acceptance
 
-Conforms to PLAN_CONVENTIONS.md (binding) and SPEC.md (normative). Section numbers cited
+Conforms to MILESTONE_CONVENTIONS.md (binding) and SPEC.md (normative). Section numbers cited
 as "SPEC §n" and "CONV §n". This is the final milestone: its proof IS SPEC §9.5's
 seven-step agent-verified acceptance workflow, so passing this plan's proof workflow is
 the definition of done for gibson v1.
