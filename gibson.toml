@@ -1,0 +1,5 @@
+[server]
+port = 7311
+
+[sessions.quick]
+description = "Quick one-off task"

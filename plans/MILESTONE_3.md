@@ -1,9 +1,10 @@
-# PLAN_M3 — Minimal browser chat
+# MILESTONE_3 — Minimal browser chat
 
 Implements MILESTONES.md **M3** exactly. Normative behavior: [SPEC.md](SPEC.md).
-Binding seams: [PLAN_CONVENTIONS.md](PLAN_CONVENTIONS.md) (cited below as CONV §n).
+Binding seams: [MILESTONE_CONVENTIONS.md](MILESTONE_CONVENTIONS.md) (cited below as CONV §n).
 Rationale reference: [BACKGROUND.md](BACKGROUND.md). This plan adds no server code paths
-beyond what M0–M2 deliver; M3 is the browser layer over M2's frozen HTTP contract.
+beyond what prior milestones deliver; M3 is the browser layer over M2's frozen
+HTTP contract.
 
 ---
 
@@ -18,17 +19,7 @@ deliberately plain — tool calls and thinking may appear as raw placeholder row
 
 ## 2. Preconditions
 
-Delivered by prior milestones (implemented from their own plans; M3 consumes them as-is):
-
-**From M0:**
-- `gibson serve [--port N] [--dev]` runs from a checkout, serves the embedded SPA from
-  `web/embed.go` (`//go:embed dist`), and in `--dev` reverse-proxies non-`/api` paths to
-  Vite at `http://localhost:5173` (CONV §1).
-- Every non-`/api/*` path serves the SPA with history-API fallback to `index.html`
-  (CONV §3, last paragraph). M3's deep links (`/sessions/{id}` opened directly in a
-  second tab) depend on this. If M0/M2 shipped without the fallback, adding it is the
-  one server-side change M3 is allowed to make (it is already pinned in CONV §3).
-- `web/` Vite + React 18 + TypeScript scaffold building to `web/dist`.
+**M0 is complete.** M3 starts from the current implementation and binding conventions.
 
 **From M1 (indirect — behind the API):** `internal/pisession`, `internal/store`; the
 browser never touches these.
@@ -121,7 +112,7 @@ shape so `hydrate` and connection-state changes flow through the same fold. Flag
 the conventions author: either bless the wrapper (M4/M5 then extend via `SessionAction`,
 with `{ kind: "stream"; event: StreamEvent }` carrying every wire event) or repin.
 Field names/shapes above (`inFlightMessage`, `entryIds: Set<string>`) match the state
-shape PLAN_M4 extends.
+shape MILESTONE_4 extends.
 
 Stream fold (complete for M3):
 
@@ -307,11 +298,10 @@ Pinned here so the proof workflow (and M4–M7 proofs) can assert deterministica
 11. **testids + minimal CSS** — apply §4.8; single stylesheet, legibility only
     (readable measure, monospace for placeholders, muted rows).
 12. **Unit tests** — §7.
-13. **Build integration** — `cd web && npm run build`, `go build ./...`, run
-    `gibson serve` in a scratch workspace, click through manually once; verify the
-    `--dev` path still proxies (M0 behavior untouched). Verify deep-linking
-    `/sessions/{id}` cold (SPA fallback precondition) — if it 404s, add the fallback to
-    `internal/httpapi` exactly as CONV §3 specifies, with a Go test.
+13. **Build integration** — run `make build` and `go test ./...`; run the canonical
+    `build/gibson` artifact with `serve` in a scratch workspace and click through once. Verify
+    the `--dev` path still proxies and cold deep links such as `/sessions/{id}` still
+    use the existing SPA fallback.
 
 ## 6. Interfaces exposed to later milestones
 
@@ -378,9 +368,8 @@ Only test scaffolding changes if decided otherwise.
 each assistant block type from fixture entries without throwing; aborted marker appears
 when `stopReason === "aborted"`.
 
-**Go:** none new, except the SPA-fallback test if step 13 shows it missing
-(`internal/httpapi`: `GET /sessions/anything` → 200 `text/html`, `GET /api/nope` → 404
-JSON envelope).
+**Go:** none new. Existing `internal/httpapi` tests own the SPA-fallback contract
+(`GET /sessions/anything` → 200 `text/html`, `GET /api/nope` → 404 JSON envelope).
 
 **fakepi / real-pi:** no new Go integration tests — M2 already covers the HTTP contract
 with fakepi (CONV §9). M3's end-to-end proof is the browser workflow below against real
@@ -389,13 +378,15 @@ pi (milestone acceptance proofs use real pi per CONV §9).
 ## 8. Agent-verified proof workflow
 
 Run by an agent with browser automation (e.g. the `agent-browser` CLI). Requires real
-`pi` 0.82.x on `$PATH` with working LLM credentials. `$REPO` = this repo's checkout.
+pi 0.82.0 or newer on `$PATH` with working LLM credentials. The 0.82 minor line is
+verified; later minor or major versions are allowed with Gibson's unverified-version warning.
+`$REPO` = this repo's checkout.
 
 1. **Build**
    ```sh
-   cd $REPO/web && npm ci && npm run build
-   cd $REPO && go build -o .sandbox/gibson . && ./.sandbox/gibson --version
-   pi --version   # expect 0.82.x
+   cd $REPO/web && npm ci
+   cd $REPO && make build && ./build/gibson --version
+   pi --version   # expect 0.82.0 or newer
    ```
 2. **Scratch workspace** (house rule: `.sandbox/`, not `/tmp`)
    ```sh
@@ -404,8 +395,8 @@ Run by an agent with browser automation (e.g. the `agent-browser` CLI). Requires
    printf '.gibson/\n' > .gitignore
    git add -A && git commit -m init
    ```
-3. **Serve** — from `$WS/main`, run `$REPO/.sandbox/gibson serve` in the background.
-   Expect a startup log naming `127.0.0.1:7391`; no gitignore warning.
+3. **Serve** — from `$WS/main`, run `$REPO/build/gibson serve` in the background.
+   Expect a startup log naming `127.0.0.1:7391`.
 4. **Load app** — browser → `http://127.0.0.1:7391/`. Expect `[data-testid=session-list]`
    (empty) and `[data-testid=new-session]`.
 5. **Launch flow** — click `new-session`. Assert `launch-type` offers `quick` and
@@ -446,7 +437,7 @@ Run by an agent with browser automation (e.g. the `agent-browser` CLI). Requires
     gone (`pgrep -f "$SID"` empty — scoped to `$SID` so unrelated pi sessions on the
     machine don't fail the proof).
 14. **Dev proxy check** (SPEC §8.1.3) — start the Vite dev server (`cd $REPO/web && npm
-    run dev`, background), then from `$WS/main` run `$REPO/.sandbox/gibson serve --dev`
+    run dev`, background), then from `$WS/main` run `$REPO/build/gibson serve --dev`
     in the background. Assert `curl -s http://127.0.0.1:7391/` returns HTML containing
     `/@vite/client` (Vite dev-server marker, absent from the embedded build), and
     `curl -s http://127.0.0.1:7391/api/health` returns `{"ok":true,...}` (handled by
@@ -456,7 +447,7 @@ Any failed assertion fails the milestone.
 
 ## 9. Success criteria checklist
 
-- [ ] `npm run build` + `go build` produce a single binary serving the SPA (SPEC §8.1.1–8.1.2; M0 pipeline unbroken)
+- [ ] `make build` produces the canonical `build/gibson` artifact serving the SPA (SPEC §8.1.1–8.1.2; existing pipeline unbroken)
 - [ ] `--dev` still proxies to Vite for hot reload (SPEC §8.1.3; proof step 14)
 - [ ] Launch flow: session type from config + checkout from enumeration + optional name + first message (SPEC §8.2 "Launch flow", §2.2.2)
 - [ ] Creating a session from the UI spawns pi in the chosen checkout; session file under `<checkout>/.gibson/sessions/` (SPEC §9.2.a; proof step 12)

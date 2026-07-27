@@ -1,6 +1,6 @@
-# PLAN_M7 — v1 hardening and full acceptance
+# MILESTONE_7 — v1 hardening and full acceptance
 
-Conforms to PLAN_CONVENTIONS.md (binding) and SPEC.md (normative). Section numbers cited
+Conforms to MILESTONE_CONVENTIONS.md (binding) and SPEC.md (normative). Section numbers cited
 as "SPEC §n" and "CONV §n". This is the final milestone: its proof IS SPEC §9.5's
 seven-step agent-verified acceptance workflow, so passing this plan's proof workflow is
 the definition of done for gibson v1.
@@ -13,21 +13,15 @@ the definition of done for gibson v1.
 
 Per MILESTONES.md M7: scope is whatever the acceptance run flushes out, plus the
 deliberately-deferred edges — multi-device via non-localhost `bind`, slow-client
-backpressure verification, pi version pinning behavior, the `.gibson/` self-containment
-audit, and a docs pass (README: install, configure, run).
+backpressure verification, pi compatibility-policy behavior, the `.gibson/`
+self-containment audit, and a docs pass (README: install, configure, run).
 
 ---
 
 ## 2. Preconditions
 
-M0–M6 are implemented per their own plans. M7 builds no new product features; it
-verifies, hardens, and documents. Concretely, M7 consumes:
-
-**From M0** — `gibson serve [--port N] [--dev]` (CONV §1); `internal/config` with
-`Validate()` naming the offending field (SPEC §3); workspace-root derivation
-(`internal/workspace`, SPEC §2.1); Vite build embedded via `web/embed.go` (`//go:embed
-dist`); startup `.gibson/` gitignore warning (SPEC §4.2.2) and pi presence/version check
-(SPEC §5.4.1, CONV §6 — constant in `internal/pisession/version.go`, prefix `0.82.`).
+**M0 is complete.** M1–M6 are implemented per their own plans. M7 builds no new product
+features; it verifies, hardens, and documents. Concretely, M7 consumes:
 
 **From M1** — `internal/pisession` per CONV §6/§7: `pisession.Session` with `Prompt`,
 `Abort`, `GetState`, `GetEntries`, `GetSessionStats`, `SetSessionName`, `RespondUI`,
@@ -68,8 +62,8 @@ New or extended files (repo-relative):
 | Path | What |
 |---|---|
 | `README.md` | The v1 docs pass: install, configure, run (outline in §4.8). |
-| `cmd/serve_test.go` (extend) | Startup error matrix (SPEC §9.1.b), bind matrix (SPEC §3.2.2), full-lifecycle `.gibson/` self-containment audit test. |
-| `internal/pisession/version_test.go` (extend) | Version accept/reject table; real-pi-gated `pi --version` output-parse guard. |
+| `internal/app/serve_test.go` (extend) | Startup error matrix (SPEC §9.1.b), bind matrix (SPEC §3.2.2), full-lifecycle `.gibson/` self-containment audit test. |
+| `internal/pisession/version_test.go` (extend) | Verified/unverified/rejected compatibility table; real-pi-gated `pi --version` output-parse guard. |
 | `internal/httpapi/backpressure_test.go` | Slow-client disconnect + fast-client isolation under flood (SPEC §7.2.4). |
 | `internal/httpapi/heartbeat_test.go` | `:hb` emission on idle streams with injectable interval (SPEC §7.2.3). |
 | `internal/session/manager_test.go` (extend) | Single-writer guard: no second spawn for a live session id (SPEC §5.1.3). |
@@ -96,25 +90,27 @@ green. Hardening fixes stay inside the existing seams — if a fix would require
 wire field or route, it is out of scope and must be raised as an open question instead
 (CONV §10).
 
-### 4.2 pi version pinning (SPEC §5.4.1, §10.5; CONV §6)
+### 4.2 pi compatibility policy (SPEC §5.4.1, §10.5)
 
-The check exists since M0: at `gibson serve` startup, run `<pi_bin> --version`, require
-prefix `0.82.` (patch drift allowed), exit with an error naming both the found and the
-supported version on mismatch. M7 pins the behavior with tests:
+At `gibson serve` startup, run
+`<pi_bin> --version`, require semantic version 0.82.0 or newer, treat the 0.82 minor line
+as verified, and allow later minor or major versions while logging an unverified-version warning that
+names the found, verified, and minimum versions. M7 locks that behavior with tests:
 
-- **Parse rule:** take the first token in the output that matches `\d+\.\d+\.\d+`
-  (tolerates both bare `0.82.1` and any `pi 0.82.1`-style prefix). A real-pi-gated test
-  asserts the parse against the actually-installed binary's output, so a future pi that
+- **Parse rule:** take the first token-boundary semantic version in the output, allowing
+  an optional `v` prefix plus valid prerelease/build suffixes (tolerates both bare
+  `0.82.1` and `pi version v0.82.1 (release)`). A real-pi-gated test asserts the parse
+  against the actually-installed binary's output, so a future pi that
   changes its `--version` format fails loudly in the gated suite rather than silently in
   the field (SPEC §10.5).
-- **Accept/reject table** (pure unit test on the parse+compare function):
-  accept `0.82.0`, `0.82.1`, `0.82.99`; reject `0.81.9`, `0.83.0`, `1.0.0`, empty
-  output, non-semver garbage — each rejection's error names the found string and the
-  supported `0.82.x` range.
-- **Startup path test:** a shim executable that answers `--version` with `0.99.0` wired
-  in via `pi_bin`; `gibson serve` must exit non-zero with a distinct error containing
-  both `0.99.0` and `0.82` (SPEC §9.1.b). A second shim that is absent/non-executable
-  proves the *missing pi* error is distinct from the *wrong version* error.
+- **Compatibility table** (pure unit test on parse + compare): accept verified
+  `0.82.0`, `0.82.1`, and `0.82.99`; accept `0.83.0` and `1.0.0` as unverified; reject
+  `0.81.9`, `0.82.0-rc.1`, empty output, and non-semver garbage. Too-old errors name the
+  found version and minimum 0.82.0; unparseable output remains a distinct failure.
+- **Startup path tests:** a shim answering `0.81.9` makes `gibson serve` exit non-zero
+  with an error naming the found and minimum versions. A shim answering `0.99.0` is
+  allowed to serve and emits the unverified-version warning. An absent/non-executable
+  shim proves *missing pi* remains distinct from *too-old pi* (SPEC §9.1.b).
 
 ### 4.3 Non-localhost bind (SPEC §3.2.2, §9.1.a; BACKGROUND #14)
 
@@ -166,9 +162,9 @@ Claim: a full gibson lifecycle writes nothing outside `<checkout>/.gibson/` — 
 checkout tree, not at the workspace root, not in sibling worktrees, and (because
 `--session-dir` is always passed) not in pi's default `~/.pi/agent/sessions/`.
 
-- **Automated (fakepi):** in `cmd/serve_test.go`, build a `testws` workspace, take a
-  recursive file inventory of the workspace root (pruning `.git/`), then run the full
-  lifecycle through REST: create session → message → then, **with the session still
+- **Automated (fakepi):** in `internal/app/serve_test.go`, build a `testws` workspace,
+  take a recursive file inventory of the workspace root (pruning `.git/`), then run the
+  full lifecycle through REST: create session → message → then, **with the session still
   live**, SIGKILL the serve process (no graceful shutdown — CONV §6's shutdown path
   would itself write `stopped`, so an unclean kill is what leaves the stale `live`
   registry entry the sweep exists for) → start server, asserting the startup sweep
@@ -183,8 +179,8 @@ checkout tree, not at the workspace root, not in sibling worktrees, and (because
   `--session-dir` and the session truly lives with its worktree).
 
 Allowed exceptions, by construction: `gibson.toml` and the `.gitignore` line are
-committed repo citizens created at workspace setup, not by gibson at runtime (SPEC
-§3.1.1, §4.2.1 — gibson never writes either, per §4.2.2).
+committed repo citizens created at workspace setup, not by Gibson (SPEC §3.1.1,
+§4.2.1).
 
 ### 4.6 Single-writer guard (SPEC §5.1.3, §10.1)
 
@@ -217,11 +213,11 @@ SPEC.md. Outline (binding for the implementer; prose is theirs):
 
 1. **What gibson is** — one paragraph: Go binary, localhost web UI for pi sessions,
    one server per grove-style workspace; browser tabs are disposable viewers.
-2. **Requirements** — pi `0.82.x` on `$PATH` (or `pi_bin`), git, a grove-style
+2. **Requirements** — pi 0.82.0 or newer on `$PATH` (or `pi_bin`), git, a grove-style
    workspace; for building from source: Go 1.26 + Node.
-3. **Install** — build from source: `cd web && npm ci && npm run build`, then
-   `go build -o gibson .` (the SPA is embedded via `go:embed`; note that `go install`
-   only works from a tree with `web/dist` built).
+3. **Install** — build from source with `cd web && npm ci`, then `make build`; the
+   canonical artifact is `build/gibson` with the SPA embedded via `go:embed`. Note that
+   `go install` only works from a tree with `web/dist` built.
 4. **Configure** — full `gibson.toml` example (SPEC §3.2 schema verbatim: `server.port`
    required, `server.bind` default `127.0.0.1`, `pi_bin`, `[sessions.<name>]` with
    `description`/`model`/`thinking`/`extra_args`); the committed `.gitignore` line
@@ -239,8 +235,9 @@ SPEC.md. Outline (binding for the implementer; prose is theirs):
 8. **Single-writer warning** — never open a live gibson session with terminal `pi`;
    `pi --session-dir .gibson/sessions --resume` is safe only for stopped/closed
    sessions (SPEC §10.1).
-9. **pi version support** — pinned to `0.82.x`; the startup check and `pi_bin` as the
-   pinning tool (SPEC §5.4, §10.5).
+9. **pi version support** — minimum 0.82.0; the 0.82 minor line is verified and newer
+   versions run with an unverified-version warning; `pi_bin` selects the executable
+   checked at startup (SPEC §5.4, §10.5).
 10. **Limitations (v1)** — SPEC §1.2 non-goals in user terms, plus the `ui.custom()`
     degradation: extensions whose core value is a custom TUI silently lose it over RPC;
     session types intended for web use should omit them (SPEC §10.4, §6.4.4).
@@ -268,22 +265,22 @@ no open questions to escalate.
 
 Ordered; paths repo-relative.
 
-1. **Preflight.** `cd web && npm ci && npm run build`; `go build ./...`;
-   `go test ./...` — the M0–M6 suites must be green before hardening starts. Fix any
-   drift from CONV found here as triage defects (record in step 9's list).
-2. **Version pinning tests** (§4.2): extend `internal/pisession/version_test.go` with
-   the accept/reject table (exported-or-test-accessible parse+compare function in
-   `internal/pisession/version.go`); add the real-pi-gated output-parse test using
+1. **Preflight.** `cd web && npm ci`; `cd .. && make build`; `go test ./...` — the
+   canonical `build/gibson` artifact must exist and the prior milestone suites must be
+   green before hardening starts. Fix any drift from CONV found here as triage defects (record in step
+   9's list).
+2. **Compatibility-policy tests** (§4.2): extend `internal/pisession/version_test.go`
+   with the verified/unverified/rejected table (test-accessible parse + compare function
+   in `internal/pisession/version.go`); add the real-pi-gated output-parse test using
    `pitest.RequireRealPi(t)`.
-3. **Startup error matrix** (SPEC §9.1.b) in `cmd/serve_test.go`: five cases, each
-   asserting a *distinct* error string — (a) missing `gibson.toml`, (b) invalid
+3. **Startup error matrix** (SPEC §9.1.b) in `internal/app/serve_test.go`: five cases,
+   each asserting a *distinct* error string — (a) missing `gibson.toml`, (b) invalid
    `gibson.toml` naming the bad field, (c) occupied port (pre-`net.Listen` the port,
    expect exit, no auto-increment per SPEC §3.2.1), (d) missing pi binary
-   (`pi_bin = "/nonexistent"`), (e) unsupported pi version (shim from step 2). Also
-   assert the `.gibson/` gitignore warning fires when the entry is absent and names the
-   fix (SPEC §9.1.c, §4.2.2).
-4. **Bind matrix** (§4.3) in `cmd/serve_test.go`: default-loopback negative probe;
-   `bind = "0.0.0.0"` (fallback: concrete interface IP) positive probe; skip-with-reason
+   (`pi_bin = "/nonexistent"`), (e) too-old pi version (shim from step 2). Add a sixth
+   non-failing case proving a newer unverified pi logs a Charm Log v2 warning and serves.
+4. **Bind matrix** (§4.3) in `internal/app/serve_test.go`: default-loopback negative
+   probe; `bind = "0.0.0.0"` (fallback: concrete interface IP) positive probe; skip-with-reason
    when no non-loopback interface exists. Fakepi-backed; asserts `/api/health` and the
    SPA shell (`GET /` contains the app root div).
 5. **Backpressure + heartbeat** (§4.4, §4.7): add `internal/fakepi/scenarios/flood` and
@@ -291,8 +288,8 @@ Ordered; paths repo-relative.
    interval injectable if it is not already; write `internal/httpapi/heartbeat_test.go`.
 6. **Single-writer guard** (§4.6): add `FAKEPI_SPAWN_LOG` to `internal/fakepi`; extend
    `internal/session/manager_test.go` with the one-spawn / legal-resume-respawn test.
-7. **Self-containment audit test** (§4.5) in `cmd/serve_test.go`: inventory-diff over
-   the full fakepi lifecycle including an unclean kill while the session is live, a
+7. **Self-containment audit test** (§4.5) in `internal/app/serve_test.go`:
+   inventory-diff over the full fakepi lifecycle including an unclean kill while the session is live, a
    restart that demonstrably runs the orphan sweep, and resume from `stopped`.
 8. **SPEC §10 sweep** (§4.9): for each of §10.1–§10.5, record enforcing code site +
    guarding test:
@@ -303,8 +300,8 @@ Ordered; paths repo-relative.
      `SessionListPage` treatment; asserted live in runbook step 4.
    - §10.4 `custom()` degradation → no code (pi returns `undefined` internally; nothing
      crosses the wire); README §4.8 item 10 documents it.
-   - §10.5 churn → version pin (step 2); verbatim `json.RawMessage` forwarding (CONV §2
-     — spot-check no handler re-models pi payloads); docs read from the installed
+   - §10.5 churn → compatibility policy (step 2); verbatim `json.RawMessage`
+     forwarding (CONV §2 — spot-check no handler re-models pi payloads); docs read from the installed
      package (this plan's own sourcing).
    Fix any gap found; add the missing test alongside the fix.
 9. **Triage loop.** Execute the §8 runbook end to end with real pi. For every failure:
@@ -331,14 +328,16 @@ repeatable regression harness for future releases.
 ## 7. Testing
 
 **Unit (no subprocess):**
-- `internal/pisession/version_test.go`: parse/compare table — accepts `0.82.0/1/99`;
-  rejects `0.81.9`, `0.83.0`, `1.0.0`, empty, garbage; error text names found +
-  supported (SPEC §5.4.1).
+- `internal/pisession/version_test.go`: parse/compare table — accepts `0.82.0/1/99` as
+  verified, accepts `0.83.0` and `1.0.0` as unverified, and rejects `0.81.9`, the
+  minimum prerelease, empty, and garbage; too-old errors name found + minimum
+  (SPEC §5.4.1).
 
 **fakepi integration (default `go test ./...`, no network/LLM — CONV §9):**
-- `cmd/serve_test.go`: startup error matrix (5 distinct errors + gitignore warning;
-  SPEC §9.1.b–c); bind matrix (SPEC §3.2.2); self-containment lifecycle audit
-  (SPEC §4.1.3) including unclean kill with the session live + swept restart + resume.
+- `internal/app/serve_test.go`: startup error matrix (5 distinct errors) plus the
+  non-failing later-version warning case; bind matrix (SPEC §3.2.2); self-containment
+  lifecycle audit (SPEC §4.1.3) including unclean kill with the session live + swept
+  restart + resume.
 - `internal/httpapi/backpressure_test.go`: flood scenario; slow client disconnected on
   buffer overflow, fast client complete and gapless within deadline, server healthy
   after, slow client recovers via `Last-Event-ID` replay with no gap/duplicate
@@ -350,7 +349,8 @@ repeatable regression harness for future releases.
 
 **Real-pi gated (`GIBSON_TEST_REAL_PI=1`, via `pitest.RequireRealPi(t)`):**
 - `internal/pisession/version_test.go`: parse the installed `pi --version` output;
-  assert it satisfies the `0.82.` pin (guards SPEC §10.5 format drift).
+  assert it satisfies the minimum-version policy and classify it as verified or
+  unverified (guards SPEC §10.5 format drift).
 
 **Agent-verified:** the §8 runbook (real pi, real LLM, browser automation) — the
 acceptance itself. Not part of any `go test` target.
@@ -361,13 +361,16 @@ acceptance itself. Not part of any `go test` target.
 
 This is SPEC §9.5 expanded into an executable runbook, plus M7's deferred-edge checks
 (E1–E4). Run by an agent with browser automation (e.g. the agent-browser CLI: navigate,
-click, type, read DOM text, screenshot). Requirements: real pi 0.82.x on `$PATH` with a
-working LLM provider; macOS/Linux. All seven numbered steps map 1:1 to SPEC §9.5.
+click, type, read DOM text, screenshot). Requirements: real pi 0.82.0 or newer on
+`$PATH` with a working LLM provider; macOS/Linux. The 0.82 minor line is verified;
+later minor or major versions are allowed with the startup warning. All seven numbered steps map 1:1
+to SPEC §9.5.
 
 Environment (fish-agnostic; plain sh):
 
 ```sh
-REPO=/Users/jmcampanini/Code/github.com/jmcampanini/gibson/main
+REPO=~/Code/github.com/jmcampanini/gibson/main
+GIBSON="$REPO/build/gibson"         # canonical project artifact
 SB="$REPO/.sandbox/m7-accept"        # temp storage per house rules
 WS="$SB/ws/demo"                     # scratch grove-style workspace root
 PORT=7391
@@ -378,8 +381,9 @@ BASE="http://127.0.0.1:$PORT"
 
 ```sh
 rm -rf "$SB" && mkdir -p "$WS"
-cd "$REPO/web" && npm ci && npm run build
-cd "$REPO" && go build -o "$SB/gibson" .
+cd "$REPO/web" && npm ci
+cd "$REPO" && make build
+test -x "$GIBSON"
 
 git init -b main "$WS/main"
 cd "$WS/main"
@@ -407,7 +411,7 @@ both; commit includes `gibson.toml` and `.gitignore`.
 ### Step 2 — launch gibson, open the UI (SPEC §9.5.2)
 
 ```sh
-cd "$WS/main" && "$SB/gibson" serve > "$SB/serve.log" 2>&1 &
+cd "$WS/main" && "$GIBSON" serve > "$SB/serve.log" 2>&1 &
 sleep 1
 curl -sf "$BASE/api/health"               # expect {"ok":true,"version":...}
 curl -s  "$BASE/api/config/session-types" # expect gated + quick
@@ -415,8 +419,8 @@ curl -s  "$BASE/api/checkouts"            # expect main (isPrimary) + wt-b
 ```
 
 Assert: health OK; both session types and both checkouts listed; `serve.log` shows the
-bind address and **no** gitignore warning (the entry exists). Browser: open `$BASE/`,
-assert the session-list page renders with an empty list and a new-session action.
+bind address. Browser: open `$BASE/`, assert the session-list page renders with an empty
+list and a new-session action.
 
 ### Step 3 — create a session, watch it stream (SPEC §9.5.3)
 
@@ -479,12 +483,12 @@ at the session URL. Assert:
 ### Step 6 — kill, restart, resume with full context (SPEC §9.5.6)
 
 ```sh
-pkill -9 -f "$SB/gibson serve" ; sleep 2   # unclean kill — no graceful shutdown, so the
-                                           # registry keeps a stale `live` entry (PLAN_M6 step 8)
+pkill -9 -f "$GIBSON serve" ; sleep 2   # unclean kill — no graceful shutdown, so the
+                                         # registry keeps a stale `live` entry (MILESTONE_6 step 8)
 pgrep -f -- "--session-id $SID" | wc -l    # 0 — pi died with the server (SPEC §5.3.1)
 jq -e --arg sid "$SID" '.sessions[$sid].status == "live"' \
   "$WS/main/.gibson/state.json"            # the orphan under test survived the kill
-cd "$WS/main" && "$SB/gibson" serve >> "$SB/serve.log" 2>&1 &
+cd "$WS/main" && "$GIBSON" serve >> "$SB/serve.log" 2>&1 &
 sleep 1
 grep -i sweep "$SB/serve.log"              # startup sweep log line (SPEC §5.3.2)
 curl -s "$BASE/api/sessions" | jq -r '.sessions[0].status'   # stopped (orphan sweep, SPEC §5.3.2)
@@ -529,14 +533,14 @@ LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/nul
 # below (an empty $LAN_IP would make the negative probe vacuously print refused-ok).
 # Negative first, while still bound to the default:
 curl -s --max-time 3 "http://$LAN_IP:$PORT/api/health" && echo UNEXPECTED || echo refused-ok
-pkill -TERM -f "$SB/gibson serve"; sleep 1
+pkill -TERM -f "$GIBSON serve"; sleep 1
 printf '\n' >> "$WS/main/gibson.toml"   # then set bind:
 python3 - <<EOF
 import re,io
 p="$WS/main/gibson.toml"; s=open(p).read()
 open(p,"w").write(s.replace("[server]", '[server]\nbind = "0.0.0.0"', 1))
 EOF
-cd "$WS/main" && "$SB/gibson" serve >> "$SB/serve.log" 2>&1 & sleep 1
+cd "$WS/main" && "$GIBSON" serve >> "$SB/serve.log" 2>&1 & sleep 1
 curl -sf "http://$LAN_IP:$PORT/api/health"                  # now reachable
 ```
 
@@ -545,27 +549,38 @@ Browser: load `http://$LAN_IP:$PORT/` and assert the session list renders (a
 above — it must print the SKIP line, never silently pass (§4.3).
 Revert the `gibson.toml` edit afterwards (`git -C "$WS/main" checkout gibson.toml`).
 
-### Step E2 — version pinning behavior (SPEC §5.4.1)
+### Step E2 — pi compatibility behavior (SPEC §5.4.1)
 
 ```sh
-pkill -TERM -f "$SB/gibson serve"; sleep 1
-printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo 0.99.0; exit 0; }\nexit 1\n' > "$SB/badpi"
-chmod +x "$SB/badpi"
+pkill -TERM -f "$GIBSON serve"; sleep 1
+printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo 0.81.9; exit 0; }\nexit 1\n' > "$SB/oldpi"
+chmod +x "$SB/oldpi"
 python3 - <<EOF
 p="$WS/main/gibson.toml"; s=open(p).read()
-open(p,"w").write(s.replace("[server]", '[server]\npi_bin = "$SB/badpi"', 1))
+open(p,"w").write(s.replace("[server]", '[server]\npi_bin = "$SB/oldpi"', 1))
 EOF
-cd "$WS/main" && "$SB/gibson" serve > "$SB/badver.log" 2>&1; echo "exit=$?"
+cd "$WS/main" && "$GIBSON" serve > "$SB/oldver.log" 2>&1; echo "exit=$?"
 ```
 
-Assert: non-zero exit; `badver.log` names **both** `0.99.0` and the supported `0.82`
-range; distinct from the missing-binary error (verify by pointing `pi_bin` at
-`$SB/nonexistent` and comparing messages). Revert `gibson.toml`
-(`git -C "$WS/main" checkout gibson.toml`), then restart the server so E3 has a live
-endpoint:
+Assert: non-zero exit; `oldver.log` names both found `0.81.9` and minimum `0.82.0`.
+Repeat after pointing `pi_bin` at `$SB/nonexistent`; assert the missing-binary error is
+distinct. Then prove later minor or major versions are allowed:
 
 ```sh
-cd "$WS/main" && "$SB/gibson" serve >> "$SB/serve.log" 2>&1 & sleep 1
+git -C "$WS/main" checkout gibson.toml
+printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo 0.99.0; exit 0; }\nexit 1\n' > "$SB/newpi"
+chmod +x "$SB/newpi"
+python3 - <<EOF
+p="$WS/main/gibson.toml"; s=open(p).read()
+open(p,"w").write(s.replace("[server]", '[server]\npi_bin = "$SB/newpi"', 1))
+EOF
+cd "$WS/main" && "$GIBSON" serve > "$SB/newver.log" 2>&1 & sleep 1
+curl -sf "$BASE/api/health"
+grep -F 'pi version has not been verified with Gibson' "$SB/newver.log"
+grep -F 'found=0.99.0' "$SB/newver.log"
+pkill -TERM -f "$GIBSON serve"; sleep 1
+git -C "$WS/main" checkout gibson.toml
+cd "$WS/main" && "$GIBSON" serve >> "$SB/serve.log" 2>&1 & sleep 1
 curl -sf "$BASE/api/health"                # healthy before the E3 probes
 ```
 
@@ -589,7 +604,7 @@ cd "$REPO" && go test ./... && GIBSON_TEST_REAL_PI=1 go test ./...
 
 Assert: both green (the second requires this machine's real pi).
 
-Teardown: `pkill -TERM -f "$SB/gibson serve"; rm -rf "$SB"` (keep `$SB` if evidence
+Teardown: `pkill -TERM -f "$GIBSON serve"; rm -rf "$SB"` (keep `$SB` if evidence
 screenshots/logs should be retained for the acceptance record).
 
 ---
@@ -616,25 +631,25 @@ Acceptance (SPEC §9.5 — each is a runbook step above):
 M7 deferred edges:
 - [ ] §3.2.2 Default bind is loopback-only; configured non-localhost bind serves a
       second device; no auth, documented (Step E1; README §6)
-- [ ] §5.4.1 Version pin: wrong-version pi → distinct startup error naming both
-      versions; patch drift within 0.82.x accepted (Step E2; version tests)
+- [ ] §5.4.1 Compatibility policy: pi below 0.82.0 → distinct startup error naming
+      found + minimum; 0.82.x is verified; a later pi line serves with an unverified-version
+      warning (Step E2; version tests)
 - [ ] §7.2.4 / §10.2 Slow client disconnected at 256-event overflow; pump and fast
       clients unaffected; recovery via cursor reconnect (Step E3; backpressure test)
 - [ ] §7.2.3 Heartbeat ≤30s honored (`:hb` @15s) (Step E3; heartbeat test)
 - [ ] §9.1.b Five distinct startup errors: missing config, invalid config, occupied
-      port, missing pi, unsupported version (error-matrix test)
-- [ ] §9.1.c Gitignore warning names the fix (error-matrix test)
+      port, missing pi, too-old pi version (error-matrix test)
 - [ ] §4.1.3 Automated self-containment audit green across create/stream/unclean-kill/
       swept-restart/resume/close (audit test)
 - [ ] §5.1.3 Single-writer guard: one spawn per live id under concurrency; respawn only
       from stopped/closed (manager test)
 - [ ] README.md complete per §4.8 outline (install, configure, run, security,
-      single-writer warning, version pin, limitations)
+      single-writer warning, compatibility policy, limitations)
 
 SPEC §10 sweep (each = enforcing code site + guarding test/doc recorded in step 5.8):
 - [ ] §10.1 single-writer honored  — [ ] §10.2 SSE hygiene honored —
       [ ] §10.3 blocked-visibility honored — [ ] §10.4 `custom()` degradation
-      documented — [ ] §10.5 version pinned + payloads forwarded verbatim
+      documented — [ ] §10.5 compatibility policy enforced + payloads forwarded verbatim
 
 Gates:
 - [ ] `go test ./...` green (no network/LLM — CONV §9)
@@ -651,8 +666,9 @@ Gates:
 - Per-`customType` renderers beyond the generic fallback card (SPEC §8.2).
 - Any new wire fields, SSE event types, statuses, routes, or registry schema changes —
   the CONV §3/§4/§5 surfaces are frozen; hardening fixes must fit inside them.
-- Supporting pi versions outside `0.82.x`, or adapting to future pi renames
-  (SPEC §10.5 — a future version-bump milestone's problem).
+- Supporting pi versions below 0.82.0, declaring additional minor lines verified, or
+  adapting to future pi protocol renames (SPEC §10.5 — a future compatibility milestone's
+  problem).
 - Auth or TLS for non-localhost binds (explicitly user-owned risk, BACKGROUND #14).
 - Packaging/distribution (Homebrew, release automation) — README covers build-from-
   source only.

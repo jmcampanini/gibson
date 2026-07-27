@@ -1,6 +1,6 @@
-# PLAN_M4 — Full conversation rendering
+# MILESTONE_4 — Full conversation rendering
 
-Conforms to [PLAN_CONVENTIONS.md](PLAN_CONVENTIONS.md) (cited below as CONV §n). SPEC.md is
+Conforms to [MILESTONE_CONVENTIONS.md](MILESTONE_CONVENTIONS.md) (cited below as CONV §n). SPEC.md is
 normative (cited as SPEC §n). pi RPC facts below are taken from the installed pi docs:
 `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (cited as rpc.md)
 and `docs/session-format.md` (cited as session-format.md), pi v0.82.1.
@@ -16,11 +16,9 @@ test infrastructure; the server surface it consumes is already pinned by CONV §
 
 ## 2. Preconditions
 
-Delivered by prior milestones (implemented from their own plans; M4 consumes them via the
-shared seams in CONV §3, §4, §7, §8):
+**M0 is complete.** M4 starts from the current implementation and consumes later
+milestone contracts through the shared seams in CONV §3, §4, §7, and §8.
 
-- **M0:** `gibson serve [--port] [--dev]` serving the embedded SPA; Vite dev proxy; config
-  loading (SPEC §3).
 - **M1:** `internal/pisession` with the CONV §7 `pisession.Session` interface — M4 relies
   specifically on `GetSessionStats()` and `Prompt(msg, behavior)` existing with those
   signatures; `internal/store`; base `internal/fakepi` + `internal/pitest`
@@ -139,7 +137,7 @@ interface ToolExecState {
 (fallback: `agent_end`, if settled never arrives), seeded on hydrate as
 `status === "streaming"`. It exists separately from the wire `status` because M5's
 `blocked-on-dialog` masks `streaming` on the wire while a run is still in flight —
-PLAN_M5 preconditions on this flag and keys steer-vs-follow-up off it (§4.6, §6).
+MILESTONE_5 preconditions on this flag and keys steer-vs-follow-up off it (§4.6, §6).
 
 ### 4.2 `message_update`: replace with the cumulative snapshot, never append
 
@@ -403,8 +401,8 @@ Extends M3 §4.8's append-only testid contract; the §8 proof asserts against th
 
     Typing `/note …` in the composer reaches it because pi executes extension commands
     sent via `prompt` immediately, even mid-stream (rpc.md).
-11. **Frontend unit tests** (§7), then `npm run build` + `go build` green, `go test ./...`
-    green.
+11. **Frontend unit tests** (§7), then `make build` produces the canonical
+    `build/gibson` artifact and `go test ./...` is green.
 
 ## 6. Interfaces exposed to later milestones
 
@@ -421,7 +419,7 @@ Extends M3 §4.8's append-only testid contract; the §8 proof asserts against th
   path); M6 reuses `deriveRenderModel` fed by history alone for non-live sessions
   (guaranteed by §4.1's entries-first derivation).
 - **Reducer `isStreaming` flag** (§4.1): maintained from pi `agent_start`/`agent_settled`
-  (`agent_end` fallback) — the seam PLAN_M5 §2 preconditions on; M5 keeps
+  (`agent_end` fallback) — the seam MILESTONE_5 §2 preconditions on; M5 keeps
   steer-vs-follow-up keyed off it while `blocked-on-dialog` masks the wire status.
 - **`data-testid` additions** (§4.9): append-only extension of M3 §4.8's contract, used
   by M5–M7 proof workflows.
@@ -480,13 +478,15 @@ to the browser-automation proof (§8), per CONV §9's acceptance-proof split.
 
 ## 8. Agent-verified proof workflow
 
-Real pi + browser automation (MILESTONES.md; CONV §9). Requires pi 0.82.x on `$PATH`
-with a configured LLM provider. `REPO=/Users/jmcampanini/Code/github.com/jmcampanini/gibson/main`.
+Real pi + browser automation (MILESTONES.md; CONV §9). Requires pi 0.82.0 or newer on
+`$PATH` with a configured LLM provider. The 0.82 minor line is verified; later minor or major versions
+are allowed with Gibson's unverified-version warning.
+`REPO=~/Code/github.com/jmcampanini/gibson/main`.
 
 1. **Build:**
    ```sh
-   cd "$REPO/web" && npm ci && npm run build
-   cd "$REPO" && go build -o .sandbox/gibson . && go test ./...
+   cd "$REPO/web" && npm ci
+   cd "$REPO" && make build && go test ./...
    ```
    Expect: builds green, all tests pass with no network/LLM use.
 2. **Scratch workspace** (grove-style; `.sandbox/` per house temp-storage rule):
@@ -505,9 +505,9 @@ with a configured LLM provider. `REPO=/Users/jmcampanini/Code/github.com/jmcampa
    extra_args = ["-e", "$REPO/test/fixtures/extensions/custom-note.ts"]
    EOF
    git add -A && git commit -m init
-   "$REPO/.sandbox/gibson" serve   # leave running (background)
+   "$REPO/build/gibson" serve   # leave running (background)
    ```
-   Expect: serving on 7411, no gitignore warning. `thinking = "high"` pins reasoning on
+   Expect: serving on 7411. `thinking = "high"` pins reasoning on
    so step 3(a)'s ThinkingBlock assertion cannot fail on a machine whose default
    thinking level is off; if the machine's default provider/model is not
    reasoning-capable, also set an explicit reasoning-capable `model` under

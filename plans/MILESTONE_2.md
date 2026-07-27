@@ -1,7 +1,7 @@
-# PLAN_M2 — Curl-drivable HTTP API
+# MILESTONE_2 — Curl-drivable HTTP API
 
 Implements MILESTONES.md M2 exactly. Governing documents: SPEC.md (normative behavior),
-PLAN_CONVENTIONS.md (binding names/shapes — cited below as CONV §n), pi's RPC reference at
+MILESTONE_CONVENTIONS.md (binding, cited as CONV §n), pi's RPC reference at
 `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (cited as rpc.md),
 and `session-format.md` in the same directory for the JSONL file layout. Read all four
 before implementing.
@@ -19,27 +19,10 @@ equal-peer fan-out. The pi processes are server-owned and kept alive until close
 
 ## 2. Preconditions
 
-From **M0** (built per PLAN_M0.md):
+**M0 is complete.** M2 starts from the current implementation and binding conventions.
 
-- Go module `github.com/jmcampanini/gibson`, `main.go` → `cmd.Execute()` (CONV §1).
-- `cmd/serve.go`: `gibson serve [--port N] [--dev]` starts an `http.Server` on
-  `bind:port` from config, serves the embedded SPA for non-`/api` paths (history-API
-  fallback), `--dev` reverse-proxies non-`/api` to Vite :5173 (CONV §1, §3). M2 extends
-  this command; it does not replace it.
-- `internal/config`: parsed `gibson.toml` — server port/bind, `pi_bin`, and the
-  `[sessions.<name>]` session types with `description` (required), optional `model`,
-  `thinking`, `extra_args` (SPEC §3). Assumed shape (M0 §4.2 — `pi_bin` lives in the
-  `[server]` table):
-  `config.Config{Server config.Server{Port int; Bind string; PiBin string}; Sessions map[string]config.SessionType}`.
-- `internal/workspace`: workspace-root derivation from the launch checkout (SPEC §2.1).
-  Assumed: a `workspace.Workspace` value carrying the launch-checkout path and workspace
-  root. M2 **extends** this package with checkout enumeration (SPEC §2.2.1 — the coverage
-  map assigns worktree enumeration to M2).
-- Startup checks: gitignore warning, pi presence/version check (`0.82.` prefix, CONV §6).
-- `GET /api/health` may already exist from M0's skeleton; if not, M2 adds it per CONV §3.
-
-From **M1** (built per PLAN_M1.md; the CONV §7 seam is binding, helper names are assumed
-and may be adapted at the Manager boundary if M1 named them differently):
+With M1 complete (the CONV §7 seam is binding; non-pinned helpers may be adapted at the
+Manager boundary):
 
 - `internal/pisession`: `pisession.Session` with the pinned methods `Prompt(msg, behavior)`,
   `Abort()`, `GetState()`, `GetEntries(since)`, `GetSessionStats()`, `SetSessionName(name)`,
@@ -84,11 +67,12 @@ New or extended files (paths repo-root-relative):
 | `internal/session/status.go` (+`_test.go`) | Registry-status + streaming-flag state; wire-status derivation (CONV §3) |
 | `internal/session/events.go` (+`_test.go`) | pi event → `StreamEvent` classification (CONV §4.2); registry side effects (lastActivityAt, name mirror) |
 | `internal/session/history.go` (+`_test.go`) | `HistorySnapshot`; live path via `get_entries`; non-live path parsing the session JSONL (CONV §3); `ErrInvalidCursor` |
-| `internal/httpapi/server.go` (+`_test.go`) | `New(...)` returning `http.Handler`: ServeMux route table, `/api/` JSON-404 catch-all, SPA fallback mount, slog request logging, panic→500 envelope |
+| `internal/httpapi/server.go` (+`_test.go`) | Extend the existing error-returning `New(Options)` and frontend routing with the ServeMux route table, `/api/` JSON-404 catch-all, Charm Log v2 request logging, and panic→500 envelope |
 | `internal/httpapi/wire.go` | Wire types: error envelope, request bodies, responses per CONV §3 |
 | `internal/httpapi/handlers.go` (+`_test.go`) | REST handlers for every CONV §3 route except dialogs |
 | `internal/httpapi/sse.go` (+`_test.go`) | SSE handler: connect algorithm (CONV §4.3), heartbeats, per-write deadlines |
-| `cmd/serve.go` (extend, +`_test.go`) | Wire config→workspace→Manager→httpapi; signal handling; ordered graceful shutdown |
+| `internal/app/serve.go` (extend, +`_test.go`) | Wire validated config→workspace→Manager→httpapi; own signal-driven ordered graceful shutdown |
+| `cmd/serve.go` (+`_test.go`) | Preserve the thin options-to-application Cobra adapter |
 | `internal/fakepi/scenarios/slow_stream.*` | Scenario: multi-second streamed turn (deltas at ~150ms) for mid-turn reconnect/fan-out tests (add if M1 didn't) |
 | `internal/fakepi/scenarios/crash_mid_stream.*` | Scenario: begins streaming then exits non-zero without settling (add if M1 didn't) |
 
@@ -363,10 +347,13 @@ Processes belong to the server, not to any client (SPEC §1.1, §5.2.1): SSE dis
 zero attached clients, idle time — none of it touches the pi process. Only
 `POST .../close` (→ `closed`) and server shutdown (→ `stopped`) do.
 
-`cmd/serve` wiring: config → workspace → `session.NewManager` → `httpapi.New` handler
-mounted in front of the M0 SPA/dev-proxy fallback. `http.Server` settings that matter for
-SSE: `WriteTimeout: 0` (a global write timeout would kill every stream) — liveness comes
-from per-write deadlines (§4.5) plus heartbeats; keep a sane `ReadHeaderTimeout`.
+`internal/app.Serve` wiring: `workspace.Locate` → validated `config.Load` → pi preflight
+→ `session.NewManager` → extend the existing `httpapi.Options` with M2's concrete route
+dependencies → error-returning `httpapi.New` → `http.Server`. The current production
+`StaticFS`/development `DevProxy` selection and SPA fallback remain unchanged. Server
+settings that matter for SSE: `WriteTimeout: 0` (a global write timeout would kill every
+stream) — liveness comes from per-write deadlines (§4.5) plus heartbeats; keep the
+existing sane `ReadHeaderTimeout`. Cobra only forwards `ServeOptions`.
 
 **Shutdown order** (SIGINT/SIGTERM): (1) `Manager.Shutdown(ctx)` — concurrently for each
 live session: pisession `Close` (SIGTERM→5s→SIGKILL), registry → `stopped` (CONV §6:
@@ -419,16 +406,18 @@ avoid pre-deciding M6's cleanup semantics.
 7. `internal/fakepi/scenarios/` — add `slow_stream` and `crash_mid_stream` if M1 didn't
    ship them; ensure `get_entries` honors `since` and returns `success:false` for an
    unknown cursor (needed by the reset tests).
-8. `internal/httpapi/wire.go` + `server.go` — wire types, mux with the §3 route table,
-   `/api/` JSON-404 catch-all, SPA fallback mount, logging + recovery middleware.
+8. `internal/httpapi/wire.go` + `server.go` — wire types; extend the current
+   `Options`/error-returning `New` with narrow route dependencies and the §3 route table;
+   preserve frontend validation, `/api/` JSON-404 behavior, and SPA fallback; add Charm
+   Log v2 request logging + recovery middleware.
 9. `internal/httpapi/handlers.go` — all REST handlers per §4.7.
 10. `internal/httpapi/sse.go` — connect algorithm per §4.5, heartbeat ticker
     (configurable interval, default 15s), per-write deadlines. The handler consumes a
     narrow local interface (`Subscribe`/`History`/`Get`) satisfied by `*session.Manager`
     so the replay/dedup algorithm is unit-testable against a scripted fake (§7).
-11. `cmd/serve.go` — construct and mount everything; signal-driven shutdown in the §4.9
-    order; verify `--dev` still proxies non-`/api` while `/api/**` (including SSE) is
-    served by gibson.
+11. `internal/app/serve.go` — compose Manager and HTTP dependencies and implement the
+    §4.9 shutdown order while retaining existing startup, production, and `--dev`
+    behavior. Keep `cmd/serve.go` as the thin `ServeOptions` adapter.
 12. Integration tests (§7), then the proof workflow (§8).
 
 ## 6. Interfaces exposed to later milestones
@@ -449,7 +438,9 @@ exported names inside pinned packages, flagged here as the seam later plans cons
   - `type HistorySnapshot struct { Session Summary; Entries []Entry; LeafID, Cursor *string; PendingDialog json.RawMessage; UIState UIState }`
     (`UIState{Statuses map[string]string; Widgets map[string][]string; Title *string}`)
   - `var ErrInvalidCursor error`; `var ErrNotFound error`; `var ErrNotLive error`
-  - `func NewManager(cfg *config.Config, ws *workspace.Workspace, log *slog.Logger, opts ...ManagerOption) *Manager`
+  - `func NewManager(cfg config.Config, ws *workspace.Workspace, logger *log.Logger,
+    opts ...ManagerOption) *Manager`, where `log` is `charm.land/log/v2`; `cfg` is the
+    already-validated result of `config.Load`
   - `type ManagerOption`; `func WithSubscriberBuffer(n int) ManagerOption` — overrides the
     256-event subscriber buffer capacity (test seam for the slow-client kick, §7)
   - Methods (CONV §7, minus `AnswerDialog` which M5 adds; `Stats` is an M2 addition the
@@ -462,17 +453,26 @@ exported names inside pinned packages, flagged here as the seam later plans cons
     `Stats(ctx, id string) (json.RawMessage, error)`,
     `Subscribe(id string) (*Subscription, error)`, `Shutdown(ctx)`.
 - `internal/httpapi`:
-  - `func New(o Options) http.Handler` — M0's `Options` type extended (exactly as M0 §6
-    anticipates) with the `session.Manager`; the config, workspace, version, and
-    SPA/dev-proxy fallback fields carry over from M0 unchanged. No new constructor type.
-    M5 extends the mux with the dialogs route; M3's SPA consumes the routes and SSE
-    contract as-is.
+  - `func New(options Options) (http.Handler, error)` — preserve current
+    `Options.Version`, `Options.StaticFS`, and `Options.DevProxy` semantics and extend
+    `Options` only with the Charm logger and narrow Manager/checkout/session-type
+    dependencies the new routes consume. Do not pass the whole config or workspace merely
+    for discovery;
+    `internal/app` resolves those concerns and supplies concrete values/services. No new
+    constructor type. M5 extends the mux with the dialogs route; M3's SPA consumes the
+    routes and SSE contract as-is.
 - Routes + SSE contract exactly as §3 lists — M3 (client), M5 (dialogs), M6 (resume) build
   on them without change.
 - `internal/fakepi` scenarios `slow_stream`, `crash_mid_stream` available via
   `FAKEPI_SCENARIO` for M3–M7 tests.
 
 ## 7. Testing
+
+Use contract-focused ownership: workspace/parser tests own enumeration semantics; Broker,
+status, and history tests own their local algorithms; Manager fakepi tests own process,
+registry, and lifecycle behavior; HTTP tests own wire mapping and SSE behavior; and
+`internal/app` owns composition and shutdown. Higher layers prove boundary confidence
+unavailable below and must not repeat lower-layer assertion matrices.
 
 Unit (no subprocesses):
 
@@ -490,16 +490,20 @@ Unit (no subprocesses):
   fetch returns `[e1,e2]` while the subscription buffer already holds `[e2,e3]` ⇒ client
   receives exactly `e1,e2,e3` (subscribe-first + dedup proven deterministically);
   invalid-cursor ⇒ single `reset` then EOF; `Last-Event-ID` precedence over `?since=`.
-- `httpapi/handlers_test.go` — error envelope shape for every code; validation 400s name
-  the field; JSON 404 on unknown `/api/*`.
+- `httpapi/server_test.go` owns the error-envelope encoder and preserves the existing
+  frontend/API boundary; `handlers_test.go` asserts stable status/code mappings and
+  field-level validation without duplicating envelope-shape or incidental-message tests
+  for every route.
 
-Integration (fakepi, via `pitest.BuildFakePi(t)` as `pi_bin`, `testws.New(t)` workspaces,
-`httptest.Server` over `httpapi.New`; a small SSE-reading helper lives in
-`httpapi/sse_test.go`):
+Integration uses `pitest.BuildFakePi(t)` as `pi_bin` and `testws.New(t)` workspaces.
+Manager tests invoke the real Manager directly for process/storage ownership. HTTP/SSE
+boundary tests use `httptest.Server` over the error-returning `httpapi.New`; a small
+SSE-reading helper lives in `httpapi/sse_test.go`:
 
-- **Lifecycle:** POST create (scenario `basic`) → 201, summary `streaming` then `idle`
-  (poll GET /sessions); session JSONL + stderr log exist under the checkout's `.gibson/`;
-  registry record `live` with pid.
+- **Lifecycle (Manager owner):** create with scenario `basic` → summary `streaming` then
+  `idle`; session JSONL + stderr log exist under the checkout's `.gibson/`; registry
+  record is `live` with pid. One HTTP create/list test proves 201 response and Manager
+  wiring without repeating those storage assertions.
 - **Fan-out:** scenario `slow_stream`; two SSE clients attach; third client POSTs a
   message; both receive byte-identical event sequences (excluding `:hb`), same entry-id
   order.
@@ -515,19 +519,20 @@ Integration (fakepi, via `pitest.BuildFakePi(t)` as `pi_bin`, `testws.New(t)` wo
   other client and pump unaffected, session finishes.
 - **Heartbeat:** handler configured with 100ms interval ⇒ `:hb` observed on an idle
   stream; none interleaved mid-burst.
-- **Abort:** POST abort during `slow_stream` ⇒ pi receives `abort` (fakepi records it),
-  status returns to `idle`.
-- **Close:** POST close ⇒ process exits (waitpid via pisession), registry `closed`, pid
-  zeroed, `status` event broadcast; GET /history afterwards serves identical entries from
-  the file path; POST message ⇒ 409 `conflict`; second close ⇒ 200.
-- **Crash:** scenario `crash_mid_stream` ⇒ registry `stopped`, `status` event emitted,
-  stderr tail logged.
+- **Abort (Manager owner):** abort during `slow_stream` ⇒ pi receives `abort` and status
+  returns to `idle`; the HTTP route test owns only request/response mapping.
+- **Close (Manager owner):** close ⇒ process exits, registry `closed` with pid zero,
+  `status` broadcast, and subsequent history matches the file path. HTTP tests own the
+  externally distinct 409 message result and idempotent second-close 200.
+- **Crash (Manager owner):** scenario `crash_mid_stream` ⇒ registry `stopped`, `status`
+  event emitted, stderr tail logged.
 - **Checkouts/list:** workspace with a second worktree ⇒ GET /checkouts shows both with
   correct `isPrimary`/`branch`; sessions created in both checkouts ⇒ GET /sessions merges
   with correct `checkout` names.
-- **Shutdown:** SIGTERM the serve process (subprocess-level test or direct
-  `Manager.Shutdown` + server `Shutdown`) ⇒ pi processes reaped, registry `stopped`, SSE
-  handlers unblocked, clean exit.
+- **Shutdown (`internal/app` owner):** cancel the composed serve workflow ⇒ Manager
+  shutdown precedes HTTP shutdown, pi processes are reaped, registry is `stopped`, SSE
+  handlers unblock, and serve exits cleanly. `cmd/serve_test.go` remains an options-adapter
+  test and does not duplicate lifecycle assertions.
 
 Real-pi gated (`pitest.RequireRealPi(t)`, env `GIBSON_TEST_REAL_PI=1`):
 
@@ -537,16 +542,19 @@ Real-pi gated (`pitest.RequireRealPi(t)`, env `GIBSON_TEST_REAL_PI=1`):
 
 ## 8. Agent-verified proof workflow
 
-Pure curl/scripting against a real build with **real pi** (0.82.x on `$PATH`, provider
-credentials configured — CONV §9 acceptance proofs use real pi). Run from the gibson repo
-root. Timing note: steps are written so every assertion holds regardless of where a kill
-lands relative to turn boundaries.
+Pure curl/scripting against a real build with **real pi** ≥0.82.0 on `$PATH` and
+provider credentials configured (CONV §9 acceptance proofs use real pi). The 0.82.x line
+is verified; later minor or major versions are accepted with the startup warning. Run
+from the Gibson repo root. Timing note: steps are written so every assertion holds regardless of where a
+kill lands relative to turn boundaries.
 
 1. **Build and scaffold a scratch grove workspace** (house rule: `.sandbox/`, not `/tmp`):
 
    ```sh
    WS="$PWD/.sandbox/m2-proof"; rm -rf "$WS"; mkdir -p "$WS/bin" "$WS/ws/demo"
-   go build -o "$WS/bin/gibson" .
+   make build
+   test -x build/gibson
+   cp build/gibson "$WS/bin/gibson" # intentional proof-local copy
    cd "$WS/ws/demo" && git init -q -b main main && cd main
    printf '.gibson/\n' > .gitignore
    cat > gibson.toml <<'EOF'
@@ -800,7 +808,7 @@ enumeration claims.
 - **Resume-on-demand** (M6): respawn on message to `stopped`/`closed` (replaces M2's
   409), reopen, startup orphan sweep (`live`→`stopped`), registry rebuild from
   `sessions/*.jsonl`, cross-checkout list hardening for pre-restart sessions.
-- **SPA work** (M3/M4): no frontend changes; `web/` untouched beyond M0's shell.
+- **SPA work** (M3/M4): no frontend changes; the existing `web/` shell remains unchanged.
 - **Rendering-layer concerns** (M4): tool cards, thinking blocks, context meter UI.
 - **Hardening** (M7): non-localhost bind verification, `.gibson/` self-containment audit,
   docs, SPEC §9's seven-step browser acceptance run.
