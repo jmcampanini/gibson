@@ -1,4 +1,4 @@
-# PLAN_M6 — Session management and restart resilience
+# MILESTONE_6 — Session management and restart resilience
 
 Conforms to PLAN_CONVENTIONS.md (binding). SPEC.md is normative; section references
 below are to SPEC unless prefixed `CONV` (PLAN_CONVENTIONS.md) or `MS` (MILESTONES.md).
@@ -57,10 +57,10 @@ From **M2**:
   including the connect algorithm (subscribe-first, fetch, replay, drain+dedup, prime,
   `reset` on invalid cursor). `/history` and the SSE fetch step already serve
   **non-live** sessions too, through `Manager.History`'s single code path
-  (`internal/session/history.go`, PLAN_M2 §4.6): live → `get_entries` on the process;
+  (`internal/session/history.go`, MILESTONE_2 §4.6): live → `get_entries` on the process;
   non-live → parse the session JSONL (header-scan locate, `since` filtering,
   `session.ErrInvalidCursor`). `List()` already enumerates every checkout and merges
-  each registry with in-memory state, sorted by `lastActivityAt` desc (PLAN_M2 §4.7).
+  each registry with in-memory state, sorted by `lastActivityAt` desc (MILESTONE_2 §4.7).
   **What M2 leaves for M6:** resume (`POST /message` to a non-live session is a 409 in
   M2); registry rebuild-when-missing; the startup orphan sweep and read-time orphan
   guard (M2 shows a stale `live` record as `idle`); and resolution of sessions this
@@ -103,7 +103,7 @@ Go:
   checkouts before the listener accepts requests.
 - `internal/httpapi` (extend M2's handler files in place): little new — non-live
   `/history`, the non-live SSE fetch step, non-live `/stats` → 409, and idempotent
-  `/close` shipped in M2 (PLAN_M2 §4.5–§4.7, §4.10); M6 adds `409 conflict` for
+  `/close` shipped in M2 (MILESTONE_2 §4.5–§4.7, §4.10); M6 adds `409 conflict` for
   `/abort` on non-live sessions, replaces M2's non-live `/message` 409 with the
   resume path, and extends everything to sessions resolved cross-checkout.
 - `internal/fakepi` (extend): resume behavior (load an existing session file for its
@@ -131,7 +131,7 @@ table.
 `Manager.List()` becomes the SPEC §4.1.4 definition executed literally: enumerate
 checkouts (M2 `internal/workspace`), load each checkout's registry (rebuilding per
 §4.1.2 / CONV §5 if `state.json` is missing), and merge with in-memory process state.
-M2 already enumerates, loads, merges, and sorts (PLAN_M2 §4.7); M6's additions are the
+M2 already enumerates, loads, merges, and sorts (MILESTONE_2 §4.7); M6's additions are the
 rebuild and the read-time orphan guard:
 
 - id present in the Manager's in-memory live map → wire status derived per CONV §3
@@ -284,7 +284,7 @@ spawning pi to run `get_entries`):
    cannot diverge.
 
 Reader algorithm (shipped in M2 as `internal/session/history.go`'s non-live path,
-PLAN_M2 §4.6 — restated because M6 depends on its exact semantics):
+MILESTONE_2 §4.6 — restated because M6 depends on its exact semantics):
 
 ```
 open file; read lines with bufio.Reader.ReadBytes('\n')   // CONV §6 framing rules
@@ -333,7 +333,7 @@ makes resume feel like "the session came back" rather than "open a new thing."
   and spawning one violates §4.5's reasoning. The UI hides `ContextMeter` for
   non-live sessions. (Existing error code; M6-local refinement.)
 - `POST /dialogs/{dialogId}` on non-live → `409 conflict`, exactly as M5 shipped it
-  (PLAN_M5 §4.4 step 1: `AnswerDialog` requires registry-status `live`). Dialogs
+  (MILESTONE_5 §4.4 step 1: `AnswerDialog` requires registry-status `live`). Dialogs
   cannot outlive the process (§4.5); M6 changes nothing here.
 - `POST /message` → resume path (§4.3). `POST /close` → §4.2.
 

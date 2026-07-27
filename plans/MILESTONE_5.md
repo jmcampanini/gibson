@@ -1,4 +1,4 @@
-# PLAN_M5 — Extension dialogs and surfaces
+# MILESTONE_5 — Extension dialogs and surfaces
 
 Conforms to [PLAN_CONVENTIONS.md](PLAN_CONVENTIONS.md) (all §-references to "conventions"
 mean that file; "SPEC" means [SPEC.md](SPEC.md)). Scope is exactly MILESTONES.md M5.
@@ -29,7 +29,7 @@ milestone contracts through the shared seams.
   `RespondUI(id, resolution)` is already **implemented and exercised** by M1: its fakepi
   `dialog_confirm` scenario blocks until the response arrives on stdin and M1's tests
   drive it end-to-end, with the exported type
-  `pisession.UIResolution{Value *string; Confirmed *bool; Cancelled bool}` (PLAN_M1 §6).
+  `pisession.UIResolution{Value *string; Confirmed *bool; Cancelled bool}` (MILESTONE_1 §6).
   M5 consumes both as-is except for one deliberate amendment: `Cancelled` becomes
   `*bool` (step 1 below). `internal/fakepi` + `pitest.BuildFakePi(t)` exist with the
   scenario machinery (scenario via `FAKEPI_SCENARIO`, real v3 JSONL output), including
@@ -49,7 +49,7 @@ milestone contracts through the shared seams.
   `Composer`, a session list (`SessionListPage`) that renders `SessionSummary.status`,
   and the web test runner M3 established (assumed Vitest; whatever M3 chose, M5 follows).
 - **M4**: full chat rendering; `Composer` offers steer/follow-up keyed off wire
-  `status === "streaming"` (PLAN_M4 §4.6) — there is **no** client-side streaming flag
+  `status === "streaming"` (MILESTONE_4 §4.6) — there is **no** client-side streaming flag
   in the reducer yet. M5 must build one (§4.9, step 8), because M5's `blocked-on-dialog`
   masking (§4.5) makes wire status the wrong key for the composer mid-run.
 
@@ -230,7 +230,7 @@ sessions returns empty `statuses`/`widgets` maps and `title: null` (and
 ```go
 // 1. session lookup; non-live session -> not_found (404): dialogs cannot outlive the
 //    process, so a non-live session has no pending dialog by definition (the same
-//    semantics PLAN_M6 §4.7 pins for POST /dialogs on non-live sessions).
+//    semantics MILESTONE_6 §4.7 pins for POST /dialogs on non-live sessions).
 // 2. shape-validate res against the stored method (see below); else invalid_request (400).
 // 3. CLAIM under dialogRegistry.mu:
 //      - dialogID in resolved  -> ErrDialogAlreadyAnswered (409 dialog_already_answered)

@@ -1,4 +1,4 @@
-# PLAN_M7 — v1 hardening and full acceptance
+# MILESTONE_7 — v1 hardening and full acceptance
 
 Conforms to PLAN_CONVENTIONS.md (binding) and SPEC.md (normative). Section numbers cited
 as "SPEC §n" and "CONV §n". This is the final milestone: its proof IS SPEC §9.5's
@@ -484,7 +484,7 @@ at the session URL. Assert:
 
 ```sh
 pkill -9 -f "$GIBSON serve" ; sleep 2   # unclean kill — no graceful shutdown, so the
-                                         # registry keeps a stale `live` entry (PLAN_M6 step 8)
+                                         # registry keeps a stale `live` entry (MILESTONE_6 step 8)
 pgrep -f -- "--session-id $SID" | wc -l    # 0 — pi died with the server (SPEC §5.3.1)
 jq -e --arg sid "$SID" '.sessions[$sid].status == "live"' \
   "$WS/main/.gibson/state.json"            # the orphan under test survived the kill

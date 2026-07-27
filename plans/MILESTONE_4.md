@@ -1,4 +1,4 @@
-# PLAN_M4 — Full conversation rendering
+# MILESTONE_4 — Full conversation rendering
 
 Conforms to [PLAN_CONVENTIONS.md](PLAN_CONVENTIONS.md) (cited below as CONV §n). SPEC.md is
 normative (cited as SPEC §n). pi RPC facts below are taken from the installed pi docs:
@@ -137,7 +137,7 @@ interface ToolExecState {
 (fallback: `agent_end`, if settled never arrives), seeded on hydrate as
 `status === "streaming"`. It exists separately from the wire `status` because M5's
 `blocked-on-dialog` masks `streaming` on the wire while a run is still in flight —
-PLAN_M5 preconditions on this flag and keys steer-vs-follow-up off it (§4.6, §6).
+MILESTONE_5 preconditions on this flag and keys steer-vs-follow-up off it (§4.6, §6).
 
 ### 4.2 `message_update`: replace with the cumulative snapshot, never append
 
@@ -419,7 +419,7 @@ Extends M3 §4.8's append-only testid contract; the §8 proof asserts against th
   path); M6 reuses `deriveRenderModel` fed by history alone for non-live sessions
   (guaranteed by §4.1's entries-first derivation).
 - **Reducer `isStreaming` flag** (§4.1): maintained from pi `agent_start`/`agent_settled`
-  (`agent_end` fallback) — the seam PLAN_M5 §2 preconditions on; M5 keeps
+  (`agent_end` fallback) — the seam MILESTONE_5 §2 preconditions on; M5 keeps
   steer-vs-follow-up keyed off it while `blocked-on-dialog` masks the wire status.
 - **`data-testid` additions** (§4.9): append-only extension of M3 §4.8's contract, used
   by M5–M7 proof workflows.

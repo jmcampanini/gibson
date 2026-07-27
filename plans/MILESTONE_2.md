@@ -1,4 +1,4 @@
-# PLAN_M2 — Curl-drivable HTTP API
+# MILESTONE_2 — Curl-drivable HTTP API
 
 Implements MILESTONES.md M2 exactly. Governing documents: SPEC.md (normative behavior),
 PLAN_CONVENTIONS.md (binding, cited as CONV §n), pi's RPC reference at

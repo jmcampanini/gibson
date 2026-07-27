@@ -1,4 +1,4 @@
-# PLAN_M3 — Minimal browser chat
+# MILESTONE_3 — Minimal browser chat
 
 Implements MILESTONES.md **M3** exactly. Normative behavior: [SPEC.md](SPEC.md).
 Binding seams: [PLAN_CONVENTIONS.md](PLAN_CONVENTIONS.md) (cited below as CONV §n).
@@ -112,7 +112,7 @@ shape so `hydrate` and connection-state changes flow through the same fold. Flag
 the conventions author: either bless the wrapper (M4/M5 then extend via `SessionAction`,
 with `{ kind: "stream"; event: StreamEvent }` carrying every wire event) or repin.
 Field names/shapes above (`inFlightMessage`, `entryIds: Set<string>`) match the state
-shape PLAN_M4 extends.
+shape MILESTONE_4 extends.
 
 Stream fold (complete for M3):
 

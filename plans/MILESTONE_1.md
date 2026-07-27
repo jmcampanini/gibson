@@ -1,4 +1,4 @@
-# PLAN_M1 — Headless session core (pi over RPC, no HTTP)
+# MILESTONE_1 — Headless session core (pi over RPC, no HTTP)
 
 Implementation plan for MILESTONES.md M1. SPEC.md is normative for behavior;
 PLAN_CONVENTIONS.md is binding (cited as "conventions §N"). Pi protocol facts below are

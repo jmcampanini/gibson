@@ -1,6 +1,6 @@
 # PLAN_CONVENTIONS
 
-Binding conventions for the remaining milestone plans (`PLAN_M1.md` … `PLAN_M7.md`),
+Binding conventions for the remaining milestone plans (`MILESTONE_1.md` … `MILESTONE_7.md`),
 including the seams established by the current implementation. SPEC.md is normative for
 behavior; this file pins every cross-milestone seam SPEC.md left open so
 independently written plans compose. Where this file and SPEC.md conflict, SPEC.md wins.
