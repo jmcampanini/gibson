@@ -19,10 +19,9 @@ waiting on a dialog is loudly `blocked-on-dialog` in session state (SPEC §10.3)
 
 ## 2. Preconditions
 
-Delivered by prior milestones, per their own plans, against the shared seams:
+**M0 is complete.** M5 starts from the current implementation and consumes later
+milestone contracts through the shared seams.
 
-- **M0**: `gibson serve` (embedded SPA + `--dev` proxy), `internal/config` with
-  `[sessions.<name>]` incl. `extra_args` passthrough (SPEC §3.2.4), `internal/testws`.
 - **M1**: `internal/pisession` per conventions §6–§7: spawn/argv assembly (`extra_args`
   verbatim, last), LF-only framing, single-writer goroutine, command correlation,
   `Events() <-chan pisession.Event` (`{Type, Raw}` — `extension_ui_request` events arrive
@@ -216,7 +215,9 @@ payload is still forwarded verbatim (conventions §2, churn guard):
   - `notify` and `set_editor_text` are transient — never folded into uiState.
 - Unknown `method` (future pi drift): log at `warn`, forward as `ui` (clients ignore
   unknown methods), never register as blocking — gibson must not manufacture a block it
-  cannot answer. Real drift is caught by the version pin (SPEC §5.4, §10.5).
+  cannot answer. Gibson rejects pi versions below 0.82.0; later-version drift remains
+  visible through the unverified-version warning and real-pi verification (SPEC §5.4,
+  §10.5).
 
 `uiState` is in-memory only, dies with the process. `History` for `stopped`/`closed`
 sessions returns empty `statuses`/`widgets` maps and `title: null` (and
@@ -614,13 +615,12 @@ full Manager path, assert the tool executes and the run completes.
 ## 8. Agent-verified proof workflow
 
 Real pi + browser automation, per MILESTONES M5.
-`REPO=/Users/jmcampanini/Code/github.com/jmcampanini/gibson/main`;
+`REPO=~/Code/github.com/jmcampanini/gibson/main`;
 `WS=$REPO/.sandbox/m5/ws` (`.sandbox/` per house temp-storage rule, matching the other
 milestones' proofs).
 
-1. **Build**: `cd $REPO/web && npm ci && npm run build && cd $REPO &&
-   mkdir -p .sandbox/m5 && go build -o .sandbox/m5/gibson .` — expect both builds to
-   exit 0.
+1. **Build**: `cd $REPO/web && npm ci && cd $REPO && make build` — expect the web
+   build and canonical `build/gibson` artifact build to exit 0.
 2. **Scratch workspace**:
    ```sh
    mkdir -p $WS/proj/main && cd $WS/proj/main && git init -b main
@@ -637,8 +637,8 @@ milestones' proofs).
    EOF
    git add -A && git commit -m init
    ```
-3. **Serve**: from `$WS/proj/main`, run `$REPO/.sandbox/m5/gibson serve` in the
-   background; `curl -s localhost:7411/api/health` → `{"ok":true,...}`.
+3. **Serve**: from `$WS/proj/main`, run `$REPO/build/gibson serve` in the background;
+   `curl -s localhost:7411/api/health` → `{"ok":true,...}`.
 4. **All four dialogs + surfaces** (browser automation, client A at
    `http://localhost:7411`): create a session — type `demo`, first message
    `Reply with the single word READY.`; watch the reply stream. Then, asserting each:
@@ -678,7 +678,7 @@ milestones' proofs).
    `Run bash?` appears, assert no tool output has rendered yet; click Confirm; assert
    the tool card runs and the assistant answer streams to completion.
 8. **Timeout auto-resolve**: stop the server; relaunch with the env set:
-   `CONFIRM_GATE_TIMEOUT_MS=8000 $REPO/.sandbox/m5/gibson serve`. New `gate` session, same
+   `CONFIRM_GATE_TIMEOUT_MS=8000 $REPO/build/gibson serve`. New `gate` session, same
    tool prompt. When the confirm modal appears, assert it renders a countdown from ~8s.
    Do not answer. Assert: countdown reaches 0 with the "agent continues with the
    default" hint; the agent proceeds without the tool (gate default `false` blocks it,

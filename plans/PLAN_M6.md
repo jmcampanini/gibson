@@ -20,15 +20,8 @@ full history from the pi session JSONL with no process running.
 
 ## 2. Preconditions
 
-These exist before M6 starts, delivered by prior milestones per their own plans. M6
-programs against the CONV §7 seam interfaces and the CONV §3/§4 wire contract; it does
-not re-implement them.
-
-From **M0**:
-- `internal/config`: parsed `gibson.toml` with `Sessions map[string]SessionType`
-  (description/model/thinking/extra_args, SPEC §3.2) available to `cmd/serve.go`.
-- `internal/workspace`: workspace-root derivation from the launch checkout (SPEC §2.1).
-- `gibson serve [--port] [--dev]` serving the embedded SPA; startup warnings.
+**M0 is complete.** M6 starts from the current implementation and programs against the
+later milestones' CONV §7 seam interfaces and CONV §3/§4 wire contract.
 
 From **M1**:
 - `internal/pisession`: `pisession.Session` per CONV §7 — spawn with the CONV §6 argv
@@ -36,7 +29,9 @@ From **M1**:
   [--model] [--thinking] extra_args...`, cwd = checkout), LF-only framing via
   `ReadBytes('\n')`, `c-<n>` command correlation, `Prompt/Abort/GetState/GetEntries/
   GetSessionStats/SetSessionName/RespondUI/Events/Close`, SIGTERM→5s→SIGKILL shutdown,
-  stderr capture to `logs/<id>.stderr.log`, version pin `0.82.`.
+  stderr capture to `logs/<id>.stderr.log`; startup compatibility requires pi 0.82.0
+  or newer, treats the 0.82 minor line as verified, and warns without blocking for a
+  later minor or major version.
 - `internal/store`: `.gibson/` layout creation, `state.json` registry with the CONV §5
   schema (`version:1`, per-session `{id,name,type,status,createdAt,lastActivityAt,pid}`,
   status `live|stopped|closed`), atomic write-temp-then-rename under an in-process
@@ -104,8 +99,8 @@ Go:
   send/resume/close; Broker persistence across process death; close semantics for
   non-live sessions; `History` (M2's one code path) now resolves non-live sessions in
   any checkout.
-- `cmd/serve.go` (extend): startup orphan sweep across all checkouts, before the
-  listener accepts requests.
+- `internal/app/serve.go` (extend): compose the startup orphan sweep across all
+  checkouts before the listener accepts requests.
 - `internal/httpapi` (extend M2's handler files in place): little new — non-live
   `/history`, the non-live SSE fetch step, non-live `/stats` → 409, and idempotent
   `/close` shipped in M2 (PLAN_M2 §4.5–§4.7, §4.10); M6 adds `409 conflict` for
@@ -253,10 +248,11 @@ that a process awaits us.
 
 Two layers enforce it:
 
-1. **Startup sweep** (`cmd/serve.go`, after workspace enumeration, before the HTTP
-   listener accepts): for every enumerated checkout whose `.gibson/state.json`
+1. **Startup sweep** (`internal/app/serve.go`, after workspace enumeration, before the
+   HTTP listener accepts): for every enumerated checkout whose `.gibson/state.json`
    exists, flip every `live` entry to `stopped`, zero its pid, write back atomically.
-   Log one line per checkout swept: count marked. Checkouts without a `.gibson/` are
+   Log one line per checkout swept through the injected Charm Log v2 logger: count
+   marked. Checkouts without a `.gibson/` are
    left untouched (never litter worktrees that ran no sessions). A fresh server has an
    empty live map, so at startup *every* `live` entry is by definition an orphan.
 2. **Read-time guard** (belt and braces, §4.1): any registry `live` entry without an
@@ -366,10 +362,10 @@ All paths repo-relative to `~/Code/github.com/jmcampanini/gibson/main`.
    `type:""`, `createdAt` from header timestamp, `lastActivityAt` from file mtime —
    CONV §5); corrupt-file quarantine (§4.4). Tests: sweep counts and preserves
    `stopped`/`closed`, rebuild yields degraded-but-listed entries, quarantine path.
-3. **`cmd/serve.go`** — startup sweep across all enumerated checkouts before the
-   listener accepts (§4.4), one log line per swept checkout. Test at the store level
-   plus one `cmd`-level test wiring a `testws` workspace with a hand-written
-   `live` registry entry and asserting post-startup state.
+3. **`internal/app/serve.go`** — compose the startup sweep across all enumerated
+   checkouts before the listener accepts (§4.4), with one Charm Log v2 line per swept
+   checkout. Test at the store level plus one `internal/app` test wiring a `testws`
+   workspace with a hand-written `live` registry entry and asserting post-startup state.
 4. **`internal/session/manager.go`** — cross-checkout resolution: internal
    `resolve(id) (checkout string, entry store.Record, ok bool)` scanning enumerated
    checkouts' registries (rebuilding-when-missing via step 2); `List()` per §4.1 —
@@ -490,11 +486,11 @@ path is identical for non-live). List rendering is proven by the workflow below.
 ## 8. Agent-verified proof workflow
 
 Real pi + real LLM + browser automation, per MS M6 and CONV §9. Scratch space in
-`.sandbox/` per house rules. `$REPO` = `/Users/jmcampanini/Code/github.com/jmcampanini/gibson/main`.
+`.sandbox/` per house rules. `$REPO` = `~/Code/github.com/jmcampanini/gibson/main`.
 
-1. **Build**: `cd $REPO/web && npm ci && npm run build`, then
-   `cd $REPO && go build -o .sandbox/m6/gibson .` and `go test ./...` (all green,
-   no network — fakepi only).
+1. **Build**: `cd $REPO/web && npm ci`, then `cd $REPO && make build` and
+   `go test ./...` (canonical `build/gibson` artifact present; all tests green with no
+   network — fakepi only).
 2. **Scratch workspace** (`ROOT=$REPO/.sandbox/m6/ws`):
    ```sh
    mkdir -p $ROOT/main && cd $ROOT/main && git init -b main
@@ -511,8 +507,8 @@ Real pi + real LLM + browser automation, per MS M6 and CONV §9. Scratch space i
    git add -A && git commit -m init
    git worktree add ../wt-feature -b feature
    ```
-3. **Start**: `cd $ROOT/main && $REPO/.sandbox/m6/gibson serve` (background; record
-   PID). Expect: health OK (`curl -s localhost:7461/api/health`), startup log shows
+3. **Start**: `cd $ROOT/main && $REPO/build/gibson serve` (background; record PID).
+   Expect: health OK (`curl -s localhost:7461/api/health`), startup log shows
    no sweep activity (no registries yet).
 4. **Create session A in `main`** via
    `curl -s -X POST localhost:7461/api/sessions -H 'content-type: application/json' -d '{"type":"quick","checkout":"main","name":"proof-a","message":"Reply with exactly the single word: pineapple"}'`
@@ -594,7 +590,7 @@ Real pi + real LLM + browser automation, per MS M6 and CONV §9. Scratch space i
 ## 10. Explicitly out of scope
 
 - The full seven-step acceptance run, multi-device `bind`, slow-client backpressure
-  verification, pi version-pin failure proof, `.gibson/` self-containment audit,
+  verification, pi compatibility-policy proof, `.gibson/` self-containment audit,
   README/docs — M7.
 - Any new routes/wire fields (e.g. an explicit reopen endpoint, a workspace-level
   SSE stream for list updates, session delete/rename) — not in SPEC v1; list

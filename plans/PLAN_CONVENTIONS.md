@@ -1,43 +1,51 @@
 # PLAN_CONVENTIONS
 
-Binding conventions for the eight milestone plans (PLAN_M0.md … PLAN_M7.md). SPEC.md is
-normative for behavior; this file pins every cross-milestone seam SPEC.md left open so
+Binding conventions for the remaining milestone plans (`PLAN_M1.md` … `PLAN_M7.md`),
+including the seams established by the current implementation. SPEC.md is normative for
+behavior; this file pins every cross-milestone seam SPEC.md left open so
 independently written plans compose. Where this file and SPEC.md conflict, SPEC.md wins.
 Plans MUST use these names, paths, and shapes verbatim — no local variants.
 
 ## 1. Module, layout, CLI, libraries
 
-- **Module path:** `github.com/jmcampanini/gibson`. Go 1.26. `main.go` at repo root calling
-  `cmd.Execute()` (grove-cli idiom).
+- **Module path:** `github.com/jmcampanini/gibson`. Go 1.26. `main.go` is the thin process
+  boundary at the repository root. The canonical binary output is `build/gibson`.
 - **Directory / package layout** (one-line responsibility each):
-  - `cmd/` — cobra commands, one file per command + `_test.go` sibling: `root.go`,
-    `serve.go`, `run.go`.
-  - `internal/config/` — parse + validate `gibson.toml` (SPEC §3). Struct-tagged TOML with
-    a `Validate()` method naming the offending field (grove style).
+  - `cmd/` — thin Cobra adapters, one file per command + `_test.go` sibling: `root.go`,
+    `serve.go`, `run.go`. Commands parse arguments and flags, then invoke `internal/app`.
+  - `internal/app/` — application workflows, dependency composition, startup ordering,
+    server/process lifetime, and shutdown. Workflow loggers are injected by the process
+    boundary; Cobra does not own lifecycle orchestration.
+  - `internal/config/` — parse, default, and validate `gibson.toml` (SPEC §3).
+    `Load(checkoutRoot string) (Config, error)` is the validation entry point and returns
+    only a fully validated value; unknown TOML keys are accepted silently.
   - `internal/workspace/` — workspace-root derivation and checkout enumeration via
     `git worktree list --porcelain` (SPEC §2).
   - `internal/pisession/` — spawn/supervise one `pi --mode rpc` process: argv assembly,
     JSONL framing, command/response correlation, typed client, event fan-in (SPEC §5–6).
   - `internal/store/` — `.gibson/` layout, `state.json` registry, session id generation,
-    registry rebuild, gitignore check (SPEC §4).
+    and registry rebuild (SPEC §4).
   - `internal/session/` — the Manager: session lifecycle (create/resume/close), status
     machine, per-session event Broker (fan-out, ring of subscribers), dialog registry.
   - `internal/httpapi/` — REST handlers + SSE endpoint + dev proxy; owns wire types.
   - `internal/fakepi/` — `package main`: the fake pi executable for tests (§10).
   - `internal/pitest/` — test helpers: build fakepi, drive scenarios.
   - `internal/testws/` — test helper: scratch grove-style workspace + git repo + gibson.toml.
-  - `web/` — the Vite React SPA (§9). `web/embed.go` (`package web`) exposes the built
-    `dist/` via `//go:embed dist`.
+  - `web/` — the Vite React SPA (§9). The tracked sibling `web/dist.bootstrap` keeps the
+    embed pattern valid in fresh clones; `web/embed.go` uses `//go:embed dist*`, while
+    production serving selects only the generated `dist/` subtree.
   - `test/fixtures/` — shared non-Go fixtures (notably `extensions/confirm-gate.ts`).
 - **CLI tree:** `gibson serve [--port N] [--dev]` (the server; `--dev` reverse-proxies
   non-`/api` paths to the Vite dev server at `http://localhost:5173` — single origin, no
   CORS); `gibson run <type> <message> [--checkout <name>]` (M1 one-shot, prints streamed
-  text, defaults to the launch checkout). Cobra with `SilenceErrors/SilenceUsage`,
-  version via ldflags — all per grove-cli.
+  text, defaults to the launch checkout). Cobra uses `SilenceErrors`/`SilenceUsage` and
+  ldflags version injection. Every command remains an adapter to an `internal/app`
+  workflow.
 - **Libraries (pinned):** `spf13/cobra` (CLI), `BurntSushi/toml` directly (single file, no
   layering, so go-config-loader is not needed), `net/http` stdlib with Go 1.22+
   `ServeMux` method+pattern routing (no router dependency), hand-rolled SSE via
-  `http.Flusher`, `log/slog` for server logs, `stretchr/testify` for tests. No frameworks.
+  `http.Flusher`, an injected Charm Log v2 (`charm.land/log/v2`) logger for operational
+  output, and `stretchr/testify` for tests. No frameworks.
 
 ## 2. Wire conventions
 
@@ -53,8 +61,15 @@ Plans MUST use these names, paths, and shapes verbatim — no local variants.
 
 ## 3. REST route table (SPEC §7.1)
 
-All under `/api`, JSON bodies. `{id}` is the session id; `{dialogId}` is pi's
-`extension_ui_request` uuid.
+The existing `httpapi.New` constructor returns `(http.Handler, error)`.
+`httpapi.Options` carries `Version` plus exactly one frontend input: a production
+`StaticFS fs.FS` or a development `DevProxy *url.URL`. `New` rejects zero or two frontend
+inputs and validates production asset readiness before returning. Later routes add only
+the concrete dependencies they consume; configuration and workspace orchestration remain
+in `internal/app`.
+
+All routes are under `/api` with JSON bodies. `{id}` is the session id; `{dialogId}` is
+pi's `extension_ui_request` uuid.
 
 | Method + path | Request body | Response (200/201) |
 |---|---|---|
@@ -171,6 +186,10 @@ Layout, exactly SPEC §4.1:
 └── logs/<session-id>.stderr.log
 ```
 
+Every checkout MUST contain a committed `.gitignore` entry for `.gibson/`. Every proof
+that creates `.gibson/` data MUST run `git status --porcelain` in the checkout and require
+empty output.
+
 **`state.json` schema** (checkout is implicit — the registry lives in it; no checkout
 field, so nothing goes stale on rename):
 
@@ -233,13 +252,16 @@ field, so nothing goes stale on rename):
   wait up to 5s → SIGKILL; reap; close pipes; registry → `closed` (user close) or
   `stopped` (server shutdown). Unexpected pi exit: registry → `stopped`, emit `status`
   event, log tail of stderr at error level.
-- **Version pin:** at startup run `pi --version`; require prefix `0.82.` (patch drift
-  allowed); on mismatch exit with an error naming found + supported versions (SPEC §5.4).
-  Constant lives in `internal/pisession/version.go`.
+- **Version compatibility:** at startup run `pi --version`. The minimum is 0.82.0 and
+  the 0.82.x line is verified. Versions below the minimum fail with an error naming the
+  found and minimum versions; later minor or major versions are accepted and produce an unverified-line
+  warning through the injected logger (SPEC §5.4). Constants live in
+  `internal/pisession/version.go`.
 
 ## 7. Shared Go seam interfaces
 
-Later milestones program against these names; earlier milestones must export them so.
+These names are cross-milestone targets. Introduce each seam when its first real consumer
+needs it; do not add speculative implementations solely for a later plan.
 
 - `pisession.Session` — one live process: `Prompt(msg, behavior)`, `Abort()`,
   `GetState()`, `GetEntries(since)`, `GetSessionStats()`, `SetSessionName(name)`,
@@ -280,6 +302,26 @@ Later milestones program against these names; earlier milestones must export the
 
 ## 9. Test strategy conventions
 
+Verification is contract-focused. Each behavior has one primary owner at the layer
+closest to the likely defect; higher layers prove composition only when they add
+confidence unavailable below, rather than duplicating lower-layer assertion matrices:
+
+- `internal/config` owns schema, defaults, validation, silent unknown-key handling, and
+  opaque `extra_args` behavior.
+- `internal/workspace` owns checkout discovery and workspace derivation.
+- `internal/pisession` owns resolution, version compatibility, RPC framing, and process
+  behavior.
+- `internal/store` owns persistent layout and registry behavior; repository proof owns
+  clean Git status.
+- `internal/session` owns lifecycle, status, replay, fan-out, and dialog semantics.
+- `internal/httpapi` owns HTTP/SSE wire contracts, API boundaries, static serving, and
+  development proxy routing.
+- `internal/app` owns representative workflow composition, startup ordering, warnings,
+  listener/process lifetime, and shutdown.
+- `cmd` owns Cobra shape, flags, and process-facing presentation not already proved below.
+- Browser automation owns user-visible web composition; frontend unit tests own pure
+  state and rendering contracts when that is the cheapest faithful layer.
+
 - **No automated Go test may require a live LLM or network.** Enforced by construction:
   unit/integration tests use **fakepi**.
 - **fakepi** (`internal/fakepi/`, a `package main` Go program): speaks enough RPC —
@@ -301,16 +343,17 @@ Later milestones program against these names; earlier milestones must export the
   skips unless env `GIBSON_TEST_REAL_PI=1`. Never run in default `go test ./...`.
 - **Milestone acceptance proofs**: real pi + browser automation (agent-driven), per
   MILESTONES.md. Scratch workspaces built with `internal/testws` (`testws.New(t)`:
-  temp grove-style root, git repo checkout, committed `gibson.toml` + `.gitignore`).
-  The dialog-exercising extension fixture is `test/fixtures/extensions/confirm-gate.ts`
+  temp grove-style root, git repo checkout, committed `gibson.toml` + `.gitignore`, with
+  `.gibson/` ignored). Every proof that writes `.gibson/` artifacts requires an empty
+  `git status --porcelain`. The dialog-exercising extension fixture is `test/fixtures/extensions/confirm-gate.ts`
   (calls `ctx.ui.confirm()` before tool execution) — referenced from test
   `gibson.toml` via `extra_args = ["-e", "<abs path>"]`; used by M5 and M7 (SPEC §9.5).
 - Test style: testify `require`/`assert`, table tests, `_test.go` next to code
   (grove-cli idiom). No mocking frameworks; fakes and real subprocesses only.
 
-## 10. Required PLAN_M<n>.md template
+## 10. Required remaining-milestone plan template
 
-Every plan MUST contain exactly these sections, in order:
+Every remaining milestone plan MUST contain exactly these sections, in order:
 
 1. **Goal & capability** — the "you can now …" sentence from MILESTONES.md.
 2. **Preconditions** — what prior milestones must have delivered (name the §7 interfaces

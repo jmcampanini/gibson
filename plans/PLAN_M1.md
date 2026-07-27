@@ -1,9 +1,9 @@
 # PLAN_M1 — Headless session core (pi over RPC, no HTTP)
 
 Implementation plan for MILESTONES.md M1. SPEC.md is normative for behavior;
-PLAN_CONVENTIONS.md is binding for every name, path, and shape used here (cited as
-"conventions §N"). Pi protocol facts below are taken from the docs shipped with the pinned
-pi version 0.82.1 (`~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md`,
+PLAN_CONVENTIONS.md is binding (cited as "conventions §N"). Pi protocol facts below are
+taken from the docs shipped with verified pi version 0.82.1
+(`~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md`,
 `session-format.md`, `sessions.md`) — implementers should re-read `rpc.md` before writing
 `internal/pisession`.
 
@@ -13,40 +13,17 @@ pi version 0.82.1 (`~/.local/lib/node_modules/@earendil-works/pi-coding-agent/do
 honoring your session-type config, with the session stored in `.gibson/sessions/`.
 
 This milestone builds the single riskiest seam — Go ↔ `pi --mode rpc` over JSONL — in
-isolation, drivable from the CLI with no HTTP anywhere (MILESTONES.md M1). The `run`
-command doubles as a permanent debugging tool.
+isolation, drivable from the CLI without adding or using HTTP (MILESTONES.md M1). The
+existing server remains intact. The `run` command doubles as a permanent debugging
+tool.
 
 ## 2. Preconditions
 
-Delivered by M0 (from its own plan; names per conventions §1/§6 — if M0's exported names
-differ slightly, adapt call sites but keep the pinned package locations):
-
-- Go module `github.com/jmcampanini/gibson`, Go 1.26, `main.go` → `cmd.Execute()`;
-  `cmd/root.go` (cobra root, `SilenceErrors/SilenceUsage`, ldflags version) and
-  `cmd/serve.go` exist. M1 does not touch `serve`.
-- `internal/config`: struct-tagged TOML loader for `gibson.toml` per SPEC §3 —
-  `Server{Port, Bind, PiBin}`, `Sessions map[string]SessionType` where `SessionType` =
-  `{Description, Model, Thinking string; ExtraArgs []string}` — with `Validate()` naming
-  the offending field, and discovery of the config at the git-repo root of the launch
-  checkout (SPEC §2.1.2).
-- `internal/workspace`: launch-checkout root detection and workspace-root derivation
-  (parent of the checkout, SPEC §2.1.3). Full worktree enumeration is **not** assumed
-  (it is M2 scope per MILESTONES coverage map).
-- `internal/store`: the `.gibson/` gitignore check + startup warning (SPEC §4.2.2).
-- `internal/pisession/version.go`: the supported-version constant (prefix `0.82.`) and
-  the version check, exported by PLAN_M0 §6 as `pisession.ResolvePiBin(configured string)
-  (string, error)` and `pisession.CheckPiVersion(bin string) (found string, err error)`
-  (SPEC §5.4.1, conventions §6). Those exact names are used below.
-- `internal/testws`: `testws.New(t *testing.T) *WS`, `WS{Root, Checkout}`, and
-  `WS.WriteConfig` (PLAN_M0 §4.8/§6) — the scratch-workspace helper M0's own config,
-  gitignore, and serve tests already depend on. M1 extends it in place (§4.11); it must
-  not be rewritten and its M0 surface must not change.
-
-No `internal/session`, `internal/httpapi`, Broker, or any HTTP surface exists yet, and M1
-creates none of them.
+**M0 is complete.** M1 starts from the current implementation and binding conventions.
 
 External prerequisite for the proof workflow only (not for `go test ./...`): a real
-`pi` 0.82.x on `$PATH` with a working default model.
+`pi` at least 0.82.0 on `$PATH` with a working default model. The 0.82.x line is verified;
+a later minor or major version is allowed and must produce the existing unverified-version warning.
 
 ## 3. Deliverables
 
@@ -69,16 +46,21 @@ New files (repo-relative):
 - `internal/store/id.go` — session id generation per conventions §5.
 - `internal/store/registry_test.go`, `id_test.go`.
 - `internal/workspace/checkout.go` — `ResolveCheckout(workspaceRoot, name)` (see §4.10).
-- `cmd/run.go` + `cmd/run_test.go` — `gibson run <type> <message> [--checkout <name>]`.
+- `internal/app/run.go` + `internal/app/run_test.go` — one-shot workflow, dependency
+  composition, signal handling, process lifecycle, and terminal I/O.
+- `cmd/run.go` + `cmd/run_test.go` — thin Cobra adapter for
+  `gibson run <type> <message> [--checkout <name>]`.
 - `internal/fakepi/main.go` (+ `internal/fakepi/scenarios/` package) — the fake pi
   executable (conventions §9).
 - `internal/pitest/pitest.go` — `BuildFakePi(t)`, `RequireRealPi(t)`.
 
 Extended files:
 
+- `main.go` — map the run workflow's interrupt outcome to process exit 130 while
+  preserving one-time top-level error presentation.
 - `cmd/root.go` — wire in `run`.
-- `internal/testws/testws.go` — extend M0's helper with functional options (§4.11),
-  preserving its exported surface.
+- `internal/testws/testws.go` — extend the existing helper with functional options
+  (§4.11), preserving its exported surface.
 
 ## 4. Design & rationale
 
@@ -142,7 +124,7 @@ The stdout pump goroutine only demuxes (conventions §6):
 var head struct{ Type, ID string }
 _ = json.Unmarshal(line, &head)
 if head.Type == "response" {
-    c.resolvePending(head.ID, line)    // unmatched → slog error, dropped
+    c.resolvePending(head.ID, line)    // unmatched → Charm Log error, dropped
     return
 }
 select {
@@ -159,8 +141,8 @@ re-models pi payloads). The channel is buffered (256); when full, the pump **blo
 that is the deliberate backpressure mechanism — pi applies backpressure on its side
 rather than dropping events (SPEC §6.1.3), and per-client buffering is the M2 Broker's
 job, not this layer's. Contract stated on `Events()`: the owner must drain promptly;
-in M1 the single owner is `cmd/run`'s stream loop. A pending response behind a stalled
-event in the stdout pipe would time out — the drain-promptly contract is what prevents
+in M1 the single owner is `internal/app`'s run stream loop. A pending response behind a
+stalled event in the stdout pipe would time out — the drain-promptly contract prevents
 that, and `closing` guarantees `Close` can always terminate the pump.
 
 Events generally carry no `id` field; the one exception, `bash_execution_update`
@@ -224,8 +206,9 @@ therefore see `range Events()` end and can then read a fully-populated `ExitErr(
 - `Abort(ctx)`: sends the `abort` command; pi replies `success:true` and the aborted
   assistant message carries `stopReason:"aborted"` (SPEC §6.2, rpc.md). Abort does NOT
   terminate the process — the caller keeps consuming events until `agent_settled`.
-- Unexpected exit (crash): same waiter path; the caller (here `cmd/run`, later the M2
-  Manager) observes `Done()`/channel close, marks the registry entry `stopped`, and logs
+- Unexpected exit (crash): same waiter path; the caller (here the `internal/app` run
+  workflow, later the M2 Manager) observes `Done()`/channel close, marks the registry
+  entry `stopped`, and logs
   the tail of the stderr log at error level (conventions §6).
 
 Run-loop termination event: `agent_settled`, not `agent_end` — rpc.md is explicit that
@@ -276,12 +259,12 @@ they will operate on.
 
 ### 4.9 `gibson run` UX
 
-`gibson run <type> <message> [--checkout <name>]` (conventions §1). Flow: load config
-from the launch checkout → resolve session type (unknown type → error listing configured
-types) → resolve target checkout (§4.10) → `pisession.ResolvePiBin` +
-`pisession.CheckPiVersion` (SPEC §5.4.1 — every
-gibson invocation that spawns pi checks first) → gitignore warning for the **target**
-checkout (reuse M0's check; run is creating `.gibson/` there, SPEC §4.2) →
+`gibson run <type> <message> [--checkout <name>]` (conventions §1). `cmd/run.go` only
+parses arguments/flags and invokes the application workflow. `internal/app/run.go` owns:
+locate workspace → `config.Load` (already validated) → resolve session type (unknown type
+→ error listing configured types) → resolve target checkout (§4.10) →
+`pisession.ResolvePiBin` + `pisession.CheckPiVersion` (every invocation that spawns pi
+checks first; versions newer than the verified 0.82.x line log a Charm warning) →
 `EnsureLayout` → `NewSessionID` → spawn → registry `live` → `Prompt` → stream loop →
 shutdown (`Close`, registry `stopped`).
 
@@ -307,8 +290,10 @@ without error; `1` — any gibson/pi error (bad config, unknown type/checkout, v
 mismatch, spawn failure, command failure, premature pi exit, or a final assistant
 message with `stopReason:"error"`); `130` — user interrupt.
 
-Structure run as a small `runOneShot(ctx, deps) (exitCode int, err error)` with an
-injectable signal channel so tests drive interrupts without real signals.
+Structure the application workflow as a small `internal/app` function with injected
+process/session dependencies and an injectable signal channel, returning an outcome the
+process boundary maps to exit codes 0/1/130. Tests drive interrupts without real signals;
+the Cobra adapter does not own or retest lifecycle behavior.
 
 ### 4.10 Checkout resolution without enumeration
 
@@ -324,9 +309,9 @@ the launch checkout.
 
 `internal/fakepi` is a `package main` Go program speaking enough of the RPC protocol to
 carry all default-run automated tests. Invoked with `--version` it prints `0.82.1` to
-stdout and exits 0 — this special case runs **before** any other argv validation
-(requirement handed down by PLAN_M0 §6: `run` checks the version before every spawn,
-and M2+'s serve-with-fakepi startup tests hit the same gate). Otherwise it: reads
+stdout and exits 0 — this special case runs **before** any other argv validation because
+`run` checks the version before every spawn and M2+'s serve-with-fakepi startup tests hit
+the same gate. Otherwise it: reads
 LF-JSONL commands from stdin; validates
 that argv contains `--mode rpc`, `--session-id`, `--session-dir` (exits 2 with a stderr
 message if not — an integration-level argv-assembly tripwire); answers `get_state`
@@ -373,12 +358,13 @@ command `success:true` (mirrors SPEC §6.2). On SIGTERM: exit 143 promptly.
 `pitest.BuildFakePi(t) string` compiles `./internal/fakepi` once per test process
 (package-level `sync.Once`, output in a shared temp dir) and returns the binary path to
 use as `pi_bin`. `pitest.RequireRealPi(t) string` skips unless `GIBSON_TEST_REAL_PI=1`
-and returns the resolved real `pi` path. M1 extends M0's `internal/testws` (§2) by
-making the constructor variadic — `New(t *testing.T, opts ...Option) *WS` — which is
-backward-compatible with every M0 `testws.New(t)` call site and preserves `WS{Root,
-Checkout}`, `WS.WriteConfig`, and M0's default workspace shape (temp grove-style root,
-`main/` checkout with `git init` + initial commit, committed `gibson.toml` +
-`.gitignore` containing `.gibson/`) unchanged. New options: `WithPiBin(path)` (points
+and returns the resolved real `pi` path. M1 extends the existing `internal/testws`
+helper by making the constructor variadic — `New(t testing.TB, opts ...Option) *WS` —
+which is backward-compatible with every `testws.New(t)` call site and preserves
+`WS{Root, Checkout}`, `WS.WriteConfig(t testing.TB, source string)`, and the default
+workspace shape (temp grove-style root, `main/` checkout with `git init` + initial
+commit, committed `gibson.toml` + `.gitignore` containing `.gibson/`) unchanged. New
+options: `WithPiBin(path)` (points
 `pi_bin` at fakepi), `WithSessionType(name, cfg)`, `WithSiblingCheckout(name)` (plain
 `git worktree add`).
 
@@ -395,10 +381,10 @@ covered by the §8 agent workflow, not by `go test`.
 
 ## 5. Implementation steps
 
-1. `internal/testws/testws.go` — extend M0's existing helper with the §4.11 `Option`
-   funcs (`WithPiBin`, `WithSessionType`, `WithSiblingCheckout`) via a variadic
-   `New(t, opts ...Option)`; M0's `New(t)` call sites and `WS.WriteConfig` keep
-   working. Everything else in M1 tests against it.
+1. `internal/testws/testws.go` — extend the existing helper with the §4.11 `Option`
+   funcs (`WithPiBin`, `WithSessionType`, `WithSiblingCheckout`) via
+   `New(t testing.TB, opts ...Option)`; existing `New(t)` calls and
+   `WS.WriteConfig(t, source)` keep working. Everything else in M1 tests against it.
 2. `internal/fakepi/scenarios/scenarios.go` + `internal/fakepi/main.go` — the fake pi
    per §4.11, including the `--version` → `0.82.1` special case ahead of the argv
    tripwire (framing per §4.2 rules on its own stdin reader; it is also a reference
@@ -423,13 +409,15 @@ covered by the §8 agent workflow, not by `go test`.
    transitions, `FindSessionFile` header matching against fakepi-written files.
 8. `internal/workspace/checkout.go` — `ResolveCheckout` + test (worktree `.git` file
    case included).
-9. `cmd/run.go` — `runOneShot` per §4.9, wired into cobra; `cmd/run_test.go` against
-   fakepi in a testws: stdout equals scenario text, exit 0, registry `stopped` with pid
-   0 afterward, unknown-type error text, `--checkout` targeting a sibling worktree,
-   injected-interrupt → abort → exit 130, crash scenario → exit 1 + stderr-log tail
-   mentioned.
-10. `internal/pisession/session_realpi_test.go` — the gated no-LLM real-pi test (§4.12).
-11. Run the §8 proof workflow end-to-end; fix what it flushes out.
+9. `internal/app/run.go` — implement the §4.9 workflow. `run_test.go` owns the composed
+   fakepi contract: streamed stdout, stopped registry state, sibling-checkout targeting,
+   interrupt→abort outcome, and crash cleanup/logging. It reuses lower-layer guarantees
+   instead of repeating their framing, argv, or registry assertion matrices.
+10. `cmd/run.go` — add the Cobra adapter and wire it from `cmd/root.go`; `cmd/run_test.go`
+    proves only argument/flag/application-input adaptation and outcome propagation. Keep
+    process-exit mapping at the `main.go` boundary.
+11. `internal/pisession/session_realpi_test.go` — the gated no-LLM real-pi test (§4.12).
+12. Run the §8 proof workflow end-to-end; fix what it flushes out.
 
 ## 6. Interfaces exposed to later milestones
 
@@ -438,7 +426,8 @@ here so later plans may rely on them):
 
 - `pisession.Event` = `{Type string; Raw json.RawMessage}` (conventions §7).
 - `pisession.Config` = `{PiBin, SessionID, SessionDir, Cwd, Model, Thinking string;
-  ExtraArgs []string; StderrPath string; Logger *slog.Logger}`.
+  ExtraArgs []string; StderrPath string; Logger *log.Logger}`, where `log` is
+  `charm.land/log/v2`.
 - `pisession.Spawn(ctx, Config) (*Session, error)` — spawns, starts pumps, runs the
   `get_state` readiness probe.
 - `pisession.Session` methods:
@@ -460,8 +449,9 @@ here so later plans may rely on them):
   - `Close(ctx) error` (SIGTERM→5s→SIGKILL), `Done() <-chan struct{}`,
     `ExitErr() error`, `PID() int`, `ID() string`
 - `pisession.ErrInvalidCursor`, `ErrProcessExited`, `ErrCommandTimeout`;
-  `pisession.ResolvePiBin` and `pisession.CheckPiVersion` (M0's exported names) reused
-  by `run`.
+  `pisession.ResolvePiBin(configured string) (string, error)` and
+  `pisession.CheckPiVersion(ctx, bin) (VersionResult, error)` reused by `run`, with
+  minimum/verified/newer behavior from §2.
 - `store.Store` (`store.Open(checkoutPath)`): `EnsureLayout()`, `SessionsDir()`,
   `StderrLogPath(id)`, `NewSessionID() (string, error)`, `Put(Record)`,
   `SetStatus(id string, s Status)`, `Touch(id string, t time.Time)`,
@@ -478,7 +468,11 @@ No routes, no wire types, no SSE — M1 adds nothing to conventions §3/§4 surf
 ## 7. Testing
 
 All default tests run with `go test ./...`, no network, no LLM (conventions §9);
-testify `require`/`assert`, table tests, `_test.go` next to code.
+testify `require`/`assert`, table tests, `_test.go` next to code. Each behavior has one
+primary owner: transport tests own byte/correlation contracts, process tests own RPC
+lifecycle, store tests own persistence, `internal/app` owns the composed one-shot
+workflow, and `cmd` owns only CLI adaptation. Higher layers prove wiring not duplicate
+lower-layer assertion matrices.
 
 Unit (no subprocess):
 - Framing: byte-exact table per step 4 of §5 — the U+2028/U+2029 and >1MB cases are the
@@ -499,30 +493,33 @@ fakepi integration (default run):
 - `crash_mid_stream`: pending command errors `ErrProcessExited`; `Done` then channel
   close ordering; stderr log captured.
 - `dialog_confirm`: `RespondUI` releases the block (write path for M5).
-- `cmd/run` end-to-end per step 9 of §5, including exit codes 0/1/130.
+- `internal/app` one-shot integration per step 9 of §5, including outcomes that the
+  process boundary maps to exit codes 0/1/130; `cmd/run_test.go` checks adaptation only.
 
 Real-pi gated (`GIBSON_TEST_REAL_PI=1`): the no-LLM lifecycle test of §4.12.
 
 ## 8. Agent-verified proof workflow
 
 Run by an agent against a real build with real pi (MILESTONES M1 proof). Commands are
-bash; run from the repo root `/Users/jmcampanini/Code/github.com/jmcampanini/gibson/main`
-unless stated. Scratch space under `.sandbox/` (house convention).
+bash; run from the repo root `~/Code/github.com/jmcampanini/gibson/main` unless stated. Scratch space under `.sandbox/` (house convention).
 
 1. **Build and default test suite (no network):**
    ```sh
    go vet ./... && go test -race ./...
-   go build -o .sandbox/gibson .
+   make build
+   test -x build/gibson
    ```
-   Expect: all tests PASS; binary exists.
-2. **Verify pinned pi:**
+   Expect: all tests PASS; the canonical project binary exists at `build/gibson`.
+2. **Verify pi compatibility:**
    ```sh
    pi --version
    ```
-   Expect: `0.82.x`. If not, stop — environment mismatch, not a gibson failure.
+   Expect: version ≥0.82.0. The 0.82.x line is verified; a later minor or major version
+   is accepted and Gibson warns that it is unverified. Stop only for an older or
+   unparseable environment.
 3. **Scaffold a scratch grove workspace:**
    ```sh
-   GIBSON=$PWD/.sandbox/gibson
+   GIBSON=$PWD/build/gibson
    WS=$PWD/.sandbox/m1-proof/code/github.com/proof/scratch
    mkdir -p "$WS/main" && cd "$WS/main"
    git init -b main -q
@@ -574,7 +571,7 @@ unless stated. Scratch space under `.sandbox/` (house convention).
    its worktree, SPEC §4.1.3).
 8. **Gated real-pi protocol tests:**
    ```sh
-   cd /Users/jmcampanini/Code/github.com/jmcampanini/gibson/main
+   cd ~/Code/github.com/jmcampanini/gibson/main
    GIBSON_TEST_REAL_PI=1 go test ./internal/pisession/ -run RealPi -v
    ```
    Expect: PASS (skipped without the env var in step 1's run).
@@ -589,7 +586,8 @@ All steps passing is the M1 done signal.
       layout; pi JSONL is ground truth; registry holds only gibson metadata with
       statuses `live|stopped|closed` (conventions §5 schema exactly).
 - [ ] SPEC §4.1.3 — `--checkout` sessions are self-contained in that worktree (proof 7).
-- [ ] SPEC §4.2.2 — gitignore warning fires for the target checkout when missing.
+- [ ] Repository hygiene — proof workspaces commit `.gitignore` coverage for `.gibson/`;
+      `git status --porcelain` stays empty after a run.
 - [ ] SPEC §5.1.1 — exact argv shape and cwd = target checkout (proof 4/5: one process,
       session file in that checkout).
 - [ ] SPEC §5.1.2 — gibson-assigned id matches pi's id rules; id format per
@@ -599,7 +597,8 @@ All steps passing is the M1 done signal.
 - [ ] SPEC §5.1.4 — stderr captured to `logs/<id>.stderr.log` (proof 5; crash test
       shows content).
 - [ ] SPEC §5.2.2 (M1 slice) — SIGTERM-first shutdown; pi exits 143 (gated test).
-- [ ] SPEC §5.4.1 — version checked before any spawn; mismatch names both versions.
+- [ ] SPEC §5.4.1 — version checked before any spawn; <0.82.0 fails, 0.82.x is verified,
+      and later minor or major versions proceed with a Charm Log warning naming found/verified versions.
 - [ ] SPEC §6.1.1–6.1.3 — LF-only framing with `\r` strip; U+2028/U+2029-safe; >1MB
       lines; blocking writes/reads as backpressure (unit tables + `huge_entry`).
 - [ ] SPEC §6.2 — `prompt` (accepted-not-completed semantics, `streamingBehavior`
@@ -622,8 +621,8 @@ All steps passing is the M1 done signal.
 
 Deferred to their owning milestones (do not build, even partially, beyond what §6 lists):
 
-- Any HTTP: REST routes, SSE, `session.Manager`/Broker, keep-alive multi-session
-  ownership, worktree enumeration via `git worktree list --porcelain` — M2.
+- Any new HTTP behavior: REST session routes, SSE, `session.Manager`/Broker, keep-alive
+  multi-session ownership, worktree enumeration via `git worktree list --porcelain` — M2.
 - Frontend work of any kind — M3/M4.
 - Dialog bridging/UX beyond `RespondUI` + the `dialog_confirm` fixture scenario
   (`run` only warns on blocking dialogs) — M5; the `test/fixtures/extensions/confirm-gate.ts`

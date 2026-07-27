@@ -16,11 +16,9 @@ test infrastructure; the server surface it consumes is already pinned by CONV §
 
 ## 2. Preconditions
 
-Delivered by prior milestones (implemented from their own plans; M4 consumes them via the
-shared seams in CONV §3, §4, §7, §8):
+**M0 is complete.** M4 starts from the current implementation and consumes later
+milestone contracts through the shared seams in CONV §3, §4, §7, and §8.
 
-- **M0:** `gibson serve [--port] [--dev]` serving the embedded SPA; Vite dev proxy; config
-  loading (SPEC §3).
 - **M1:** `internal/pisession` with the CONV §7 `pisession.Session` interface — M4 relies
   specifically on `GetSessionStats()` and `Prompt(msg, behavior)` existing with those
   signatures; `internal/store`; base `internal/fakepi` + `internal/pitest`
@@ -403,8 +401,8 @@ Extends M3 §4.8's append-only testid contract; the §8 proof asserts against th
 
     Typing `/note …` in the composer reaches it because pi executes extension commands
     sent via `prompt` immediately, even mid-stream (rpc.md).
-11. **Frontend unit tests** (§7), then `npm run build` + `go build` green, `go test ./...`
-    green.
+11. **Frontend unit tests** (§7), then `make build` produces the canonical
+    `build/gibson` artifact and `go test ./...` is green.
 
 ## 6. Interfaces exposed to later milestones
 
@@ -480,13 +478,15 @@ to the browser-automation proof (§8), per CONV §9's acceptance-proof split.
 
 ## 8. Agent-verified proof workflow
 
-Real pi + browser automation (MILESTONES.md; CONV §9). Requires pi 0.82.x on `$PATH`
-with a configured LLM provider. `REPO=/Users/jmcampanini/Code/github.com/jmcampanini/gibson/main`.
+Real pi + browser automation (MILESTONES.md; CONV §9). Requires pi 0.82.0 or newer on
+`$PATH` with a configured LLM provider. The 0.82 minor line is verified; later minor or major versions
+are allowed with Gibson's unverified-version warning.
+`REPO=~/Code/github.com/jmcampanini/gibson/main`.
 
 1. **Build:**
    ```sh
-   cd "$REPO/web" && npm ci && npm run build
-   cd "$REPO" && go build -o .sandbox/gibson . && go test ./...
+   cd "$REPO/web" && npm ci
+   cd "$REPO" && make build && go test ./...
    ```
    Expect: builds green, all tests pass with no network/LLM use.
 2. **Scratch workspace** (grove-style; `.sandbox/` per house temp-storage rule):
@@ -505,9 +505,9 @@ with a configured LLM provider. `REPO=/Users/jmcampanini/Code/github.com/jmcampa
    extra_args = ["-e", "$REPO/test/fixtures/extensions/custom-note.ts"]
    EOF
    git add -A && git commit -m init
-   "$REPO/.sandbox/gibson" serve   # leave running (background)
+   "$REPO/build/gibson" serve   # leave running (background)
    ```
-   Expect: serving on 7411, no gitignore warning. `thinking = "high"` pins reasoning on
+   Expect: serving on 7411. `thinking = "high"` pins reasoning on
    so step 3(a)'s ThinkingBlock assertion cannot fail on a machine whose default
    thinking level is off; if the machine's default provider/model is not
    reasoning-capable, also set an explicit reasoning-capable `model` under
