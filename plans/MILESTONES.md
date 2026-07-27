@@ -25,20 +25,7 @@ stack on earlier ones; nothing is built speculatively for a later slice.
 
 ## M0 — Walking skeleton
 
-**You can now:** run `gibson serve` from a checkout and load the app shell in a browser.
-
-Scope: Go module + CLI skeleton (`serve` command); parse `gibson.toml` (schema per SPEC §3:
-`server.port`, `server.bind`, `pi_bin`, `[sessions.<name>]`) with validation errors that
-name the field; derive workspace root from the checkout; Vite + React + TS scaffold;
-production build embedded via `go:embed`; dev mode proxying Vite; startup warnings
-(`.gibson/` gitignore check, pi presence/version check per SPEC §5).
-
-Why first: the build pipeline (Vite → embed → single binary) and config loading are pure
-plumbing risk — cheap to prove now, painful to retrofit.
-
-Proof: agent builds the binary, runs it against a scratch workspace with a test
-`gibson.toml`, fetches the page on the configured port, and verifies config validation
-errors and the gitignore/pi-version warnings fire when provoked.
+**Status: complete.**
 
 ## M1 — Headless session core (pi over RPC, no HTTP)
 
@@ -48,15 +35,17 @@ honoring your session-type config, with the session stored in `.gibson/sessions/
 Scope: the `pisession` package — spawn `pi --mode rpc --session-id <id> --session-dir <dir>`
 with flags assembled from the session type (model/thinking/`extra_args`); LF-only JSONL
 framing (SPEC §6); command/response correlation; event subscription; prompt, abort, clean
-shutdown; stderr capture to `.gibson/logs/`; session registry file in `.gibson/`. A thin
-`run` CLI command wraps it and prints streamed text.
+shutdown; stderr capture to `.gibson/logs/`; session registry file in `.gibson/`.
+`internal/app` owns the one-shot workflow; a thin `run` Cobra adapter prints streamed
+text.
 
 Why now: this is the single riskiest seam, isolated from everything else. The `run`
 command is also a permanently useful debugging tool.
 
 Proof: Go integration test + agent workflow: `gibson run` a prompt in a scratch checkout,
 verify streamed output, `agent_end`, a session JSONL in `.gibson/sessions/`, a registry
-entry, and that abort mid-stream terminates cleanly.
+entry, that abort mid-stream terminates cleanly, and that `git status --porcelain` stays
+empty after the `.gibson/` artifacts are created.
 
 ## M2 — Curl-drivable HTTP API
 
@@ -148,8 +137,8 @@ intact, and verifies orphan cleanup on a simulated crash.
 **You can now:** call it v1 — SPEC.md's acceptance workflow passes end-to-end.
 
 Scope: whatever the acceptance run flushes out, plus the deliberately-deferred edges:
-multi-device via non-localhost `bind`, slow-client backpressure verification, pi version
-pinning behavior, `.gibson/` self-containment audit (nothing written outside it), and a
+multi-device via non-localhost `bind`, slow-client backpressure verification, pi minimum
+and verified-line behavior, `.gibson/` self-containment and clean-git-status audit, and a
 docs pass (README: install, configure, run).
 
 Proof: SPEC §9's seven-step agent-verified workflow, run start to finish by a
@@ -163,8 +152,8 @@ done for v1.
 | SPEC section | Milestone |
 |---|---|
 | §1 Overview / non-goals | all (scope guard) |
-| §2 Environment model | M0 (config, workspace), M2 (worktree enumeration) |
-| §3 Configuration | M0 (schema), M1 (session types) |
+| §2 Environment model | M0 (complete), M2 (worktree enumeration) |
+| §3 Configuration | M0 (complete), M1 (session types) |
 | §4 Storage | M1 (`.gibson/` layout), M6 (registry lifecycle) |
 | §5 Process model | M1 (spawn), M2 (keep-alive), M6 (resume, orphans) |
 | §6 pi RPC integration | M1 (framing, commands), M4 (events/rendering), M5 (dialogs) |

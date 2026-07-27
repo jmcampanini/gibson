@@ -49,7 +49,7 @@ Prior art worth a skim before writing code: pi's experimental first-party `packa
 - Heartbeat SSE streams (~30s); apply per-client backpressure so a slow phone can't stall the pi stdout pump.
 - A blocking dialog with no connected client simply waits — correct with keep-alive processes, but "blocked on dialog" must be loud in the session list.
 - Monotonic cursor ordering and dedup on reconnect.
-- Protocol churn is the top maintenance risk (pi renamed orgs and packages within months); record the pi version and check at startup.
+- Protocol churn is the top maintenance risk (pi renamed orgs and packages within months); check the pi version at startup, require at least 0.82.0, treat 0.82.x as verified, and keep later minor or major versions visible with a warning rather than blocking them.
 
 ## The decisions
 
@@ -91,7 +91,7 @@ Prior art worth a skim before writing code: pi's experimental first-party `packa
 
 ### 10. `.gibson/` ignored via a committed `.gitignore` entry
 
-*Consequence of #9: `.gibson/` now sits inside a git repo.* Options: a committed `.gitignore` entry (visible, versioned, zero magic — matches `gibson.toml` already being a repo citizen), silently auto-writing `.git/info/exclude`, or both. **Chosen: committed `.gitignore` entry** (the recommendation), with gibson warning at startup if it's missing.
+*Consequence of #9: `.gibson/` now sits inside a git repo.* Options: a committed `.gitignore` entry (visible, versioned, zero magic — matches `gibson.toml` already being a repo citizen), silently auto-writing `.git/info/exclude`, or both. **Chosen: committed `.gitignore` entry** (the recommendation). Repository proofs create `.gibson/` data and require a clean `git status --porcelain`.
 
 ### 11. Session types: hybrid schema
 
@@ -118,7 +118,3 @@ Prior art worth a skim before writing code: pi's experimental first-party `packa
 - **Workspace-root `.gibson/` storage** — recommended, declined in favor of per-worktree self-containment (see #9).
 - **Hybrid storage** (pi files in default location, gibson registry elsewhere) — rejected outright as the worst of both.
 - **WebSocket or dual transport** — rejected for v1; nothing needs bidirectional (see #7).
-
-## Where things stood at the end
-
-The interview closed with a shared summary: gibson is genuinely thin — a process supervisor, an event fan-out, static files, and a chat renderer — because pi already provides the protocol, persistence, resume, replay cursors, interrupt/steer semantics, and the entire dialog protocol. The agreed next step was an implementation plan ending, per the house planning rule, with an agent-verified end-to-end workflow: launch gibson against a scratch workspace, drive a real session through the web UI via browser automation (send a prompt, watch the stream, answer a dialog, reconnect a second client mid-stream), and prove the loop.

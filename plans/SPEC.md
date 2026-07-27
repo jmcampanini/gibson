@@ -72,6 +72,7 @@ Gibson targets a grove-style workspace (as managed by grove-cli):
 - 3.1.1 Exactly one config file: `gibson.toml` at the repository root, committed to version control (it therefore exists in every checkout).
 - 3.1.2 No config layering, no XDG/global fallback, no per-user overrides in v1.
 - 3.1.3 Gibson MUST fail with a clear error if `gibson.toml` is missing or invalid.
+- 3.1.4 Unknown configuration keys MUST be accepted without startup diagnostics.
 
 ### 3.2 Schema
 
@@ -122,7 +123,6 @@ All session data lives inside the checkout the session runs in:
 ### 4.2 Git hygiene
 
 - 4.2.1 `.gibson/` MUST be excluded from version control via a committed `.gitignore` entry.
-- 4.2.2 On startup, gibson MUST check that `.gibson/` is git-ignored in the launch checkout and print a prominent warning (with the suggested `.gitignore` line) if not. It MUST NOT modify `.gitignore` itself.
 
 ---
 
@@ -151,7 +151,7 @@ All session data lives inside the checkout the session runs in:
 
 ### 5.4 Pi binary compatibility
 
-- 5.4.1 Gibson v1 is developed against **pi 0.82.1**. Gibson MUST record the supported version (or version range) and check `pi --version` at startup, failing with a clear error naming both versions on mismatch outside the supported range. The pi ecosystem has a history of breaking renames; silent drift is not acceptable.
+- 5.4.1 Gibson v1 requires **pi 0.82.0 or newer** and MUST check `pi --version` at startup. The 0.82.x line is verified. Versions below 0.82.0 MUST fail with a clear error naming the found and minimum versions; later minor or major versions MUST be allowed to start with a warning that they are not yet verified. The pi ecosystem has a history of breaking renames, so version drift MUST remain visible.
 
 ---
 
@@ -272,8 +272,8 @@ The server exposes a JSON REST API plus one SSE stream per session. Exact paths 
 ### 9.1 Config & startup
 
 - a. `gibson` run in a checkout with a valid `gibson.toml` serves the SPA on the configured bind/port.
-- b. Missing/invalid config, occupied port, missing pi binary, or unsupported pi version each produce a distinct, clear error.
-- c. Missing `.gibson/` gitignore entry produces a startup warning naming the fix.
+- b. Missing/invalid config, occupied port, missing pi binary, or a pi version below 0.82.0 each produce a distinct, clear error.
+- c. Pi 0.82.x starts as verified; a later minor or major version starts with a visible unverified-version warning.
 
 ### 9.2 Sessions
 
@@ -281,6 +281,7 @@ The server exposes a JSON REST API plus one SSE stream per session. Exact paths 
 - b. Streaming responses render token-by-token; tool calls show live progress; abort stops the run and the UI reflects it.
 - c. Sending while streaming steers (or queues a follow-up when chosen).
 - d. Closing a session terminates its process; reopening/resuming respawns pi with the same session id and full history intact.
+- e. After Gibson creates `.gibson/` data in a checkout with the required committed ignore entry, `git status --porcelain` is empty.
 
 ### 9.3 Multi-client
 
@@ -295,13 +296,13 @@ The server exposes a JSON REST API plus one SSE stream per session. Exact paths 
 
 v1 is **done** when an agent (not a human) completes this workflow against a real build, using browser automation:
 
-1. Create a scratch grove-style workspace with a git repo checkout, a `gibson.toml` defining at least one session type whose `extra_args` loads a test extension that calls `ctx.ui.confirm()` before running a tool.
+1. Create a scratch grove-style workspace with a git repo checkout, a committed `.gitignore` entry for `.gibson/`, and a `gibson.toml` defining at least one session type whose `extra_args` loads a test extension that calls `ctx.ui.confirm()` before running a tool.
 2. Launch gibson; open the UI in a browser.
 3. Create a session (type + checkout + first message); observe the streamed assistant response.
 4. Trigger the extension dialog; answer it from the browser; verify the agent proceeds.
 5. While a response streams, open a second browser client; verify it renders identical state via snapshot + cursor replay and receives the remainder of the stream live.
 6. Kill the gibson server; restart it; verify the session lists as `stopped`; send a follow-up message; verify pi respawns and the conversation continues with full context.
-7. Verify the session JSONL file and stderr log exist under `<checkout>/.gibson/`, and that `git status` in the checkout shows no `.gibson/` noise.
+7. Verify the session JSONL file and stderr log exist under `<checkout>/.gibson/`, and that `git status --porcelain` in the checkout is empty.
 
 All seven steps passing proves v1.
 
@@ -313,4 +314,4 @@ All seven steps passing proves v1.
 - **10.2 SSE stream hygiene.** Heartbeat idle streams (§7.2.3); bound per-client buffers and drop slow clients (§7.2.4). A stalled phone must never block the pi pump.
 - **10.3 Dialog-blocked visibility.** A blocking dialog with no connected client simply waits (unless the extension set a timeout). With keep-alive processes this is correct — but the session list MUST surface `blocked-on-dialog` loudly so a waiting session is never invisible.
 - **10.4 `custom()` degradation.** Extensions using `ui.custom()` silently no-op over RPC. On this machine that affects: pi-review's triage UI, fuzzy-explorer, interactive-subagents' status screen, and pi-sidequest's command palette. Session types intended for web use should omit extensions whose core value is a custom TUI.
-- **10.5 Protocol churn.** Pi renamed its org and packages within months of this spec. Pin the supported pi version (§5.4), read the docs shipped with the *installed* version, and treat undocumented event fields as unstable.
+- **10.5 Protocol churn.** Pi renamed its org and packages within months of this spec. Enforce and report the compatibility policy in §5.4, read the docs shipped with the *installed* version, and treat undocumented event fields as unstable.
