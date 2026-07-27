@@ -1,10 +1,12 @@
-.PHONY: help build test cli-proof lint lint-fix fmt fmt-check tidy tidy-check check verify clean
+.PHONY: help web build test cli-proof lint lint-fix fmt fmt-check tidy tidy-check check verify clean
 
-BUILD_DIR   := build
-BINARY      := $(BUILD_DIR)/gibson
-CMD         := .
-PKG         := ./...
-GOFMT_FILES := $(shell git ls-files --cached --others --exclude-standard '*.go' | while IFS= read -r file; do [ -f "$$file" ] && printf '%s\n' "$$file"; done)
+BUILD_DIR        := build
+BINARY           := $(BUILD_DIR)/gibson
+CMD              := .
+PKG              := ./...
+WEB_DIR          := web
+WEB_INSTALL_MARK := $(WEB_DIR)/node_modules/.package-lock.json
+GOFMT_FILES      := $(shell git ls-files --cached --others --exclude-standard '*.go' | while IFS= read -r file; do [ -f "$$file" ] && printf '%s\n' "$$file"; done)
 
 VERSION := $(shell git describe --tags --dirty --always 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X github.com/jmcampanini/gibson/cmd.Version=$(VERSION)"
@@ -14,7 +16,13 @@ LDFLAGS := -ldflags "-X github.com/jmcampanini/gibson/cmd.Version=$(VERSION)"
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage:\n  make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ { printf "  %-16s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-build: ## Build Gibson into ./build/gibson.
+$(WEB_INSTALL_MARK): $(WEB_DIR)/package.json $(WEB_DIR)/package-lock.json
+	npm ci --prefix $(WEB_DIR)
+
+web: $(WEB_INSTALL_MARK) ## Build the production web application.
+	npm run build --prefix $(WEB_DIR)
+
+build: web ## Build Gibson into ./build/gibson.
 	@mkdir -p $(BUILD_DIR)
 	go build $(LDFLAGS) -o $(BINARY) $(CMD)
 
@@ -75,5 +83,5 @@ check: fmt-check tidy-check lint test ## Run all non-mutating checks.
 verify: check cli-proof ## Run the complete local and CI verification gate.
 
 clean: ## Remove build artifacts, coverage files, and test cache.
-	rm -rf $(BUILD_DIR) coverage.out coverage.html *.coverprofile
+	rm -rf $(BUILD_DIR) $(WEB_DIR)/dist coverage.out coverage.html *.coverprofile
 	go clean -testcache

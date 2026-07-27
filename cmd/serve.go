@@ -17,7 +17,7 @@ func newServeCommand(serve serveFunc) *cobra.Command {
 		Short: "Serve the Gibson web application",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			options := app.ServeOptions{Dev: dev}
+			options := app.ServeOptions{Dev: dev, Version: Version}
 			if command.Flags().Changed("port") {
 				options.PortOverride = &port
 			}

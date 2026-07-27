@@ -6,3 +6,7 @@
 - Keep unit tests fast, deterministic, isolated, and independent of ambient machine state. Explicitly control time, randomness, mutable state, files, external dependencies, and test order.
 - Use test doubles only at genuine boundaries. Do not mock the subject under test or reproduce its implementation through interaction assertions.
 - Use integration, system, or end-to-end tests when the risk depends on real boundaries, processes, lifecycles, execution environments, external systems, or complete wiring. Treat a green suite as evidence, not proof, that requirements are satisfied.
+
+# When validating browser behavior
+
+- Use `agent-browser` for browser-based validation and end-to-end browser proofs.

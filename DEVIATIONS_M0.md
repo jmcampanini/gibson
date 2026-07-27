@@ -9,6 +9,7 @@ This ledger records design deviations discovered while implementing M0. The exis
 - We chose contract-focused tests to preserve confidence without duplicating every assertion across layers.
 - We changed the binary output from `bin/gibson` to `build/gibson` to match Command K and Overlay conventions.
 - We deferred the functional `make web` target until the web project exists in Checkpoint 2.
+- We bootstrap `go:embed` with a sibling sentinel rather than a tracked file inside generated `web/dist/`.
 - We will reconcile these differences with the existing plans after M0 is complete.
 
 ## D-001 — Application orchestration
@@ -48,7 +49,31 @@ This ledger records design deviations discovered while implementing M0. The exis
 ## D-005 — Web Make target sequencing
 
 - **Planned design:** The initial Makefile exposes `make web` before the web project is scaffolded.
-- **M0 decision:** Checkpoint 1 exposes only functional targets. Checkpoint 2 will add `make web` with the React/Vite scaffold and make the production build depend on it.
+- **M0 decision:** Checkpoint 1 exposed only functional targets. Checkpoint 2 adds `make web` with the React/Vite scaffold and makes the production build depend on it.
 - **Reason:** A no-op target would claim to build assets it does not produce, while the real recipe cannot work before `web/package.json` exists.
-- **Potential downstream impact:** Checkpoint 2 must add the target before any production embed build is introduced.
+- **Potential downstream impact:** Build automation must install frontend dependencies before invoking the production build.
 - **Reconciliation:** Revisit the planned implementation order after M0 is complete.
+
+## D-006 — Fresh-clone embed bootstrap
+
+- **Planned design:** Force-commit `web/dist/.gitkeep`, embed `all:dist`, and recreate the placeholder after every Vite build.
+- **M0 decision:** Commit `web/dist.bootstrap` beside the generated directory and embed the `dist*` pattern. Production startup uses only the `dist/` subtree and verifies `index.html` is present.
+- **Reason:** The sibling sentinel lets a fresh clone compile without putting a tracked file inside generated output, so Vite cannot delete it and failed builds cannot leave placeholder noise.
+- **Potential downstream impact:** Build and packaging documentation must retain the sentinel and wildcard as one mechanism.
+- **Reconciliation:** Revisit the planned embed directive and placeholder workflow after M0 is complete.
+
+## D-007 — Configuration load result
+
+- **Planned design:** `config.Load(checkoutRoot)` returns `(*Config, toml.MetaData, error)` so startup can inspect undecoded keys immediately.
+- **M0 decision:** Checkpoint 2 returns `(Config, error)`, the complete result needed by its production-serving consumer. Unknown-key reporting remains in Checkpoint 3.
+- **Reason:** This avoids exposing decoder metadata before warning behavior has a consumer or settled application contract.
+- **Potential downstream impact:** Checkpoint 3 may extend the load result or add a focused diagnostics API when it implements unknown-key warnings.
+- **Reconciliation:** Revisit the planned signature after startup diagnostics are working.
+
+## D-008 — HTTP server inputs
+
+- **Planned design:** `httpapi.Options` carries configuration, workspace, version, static assets, and an optional development proxy, and `httpapi.New` always returns a handler.
+- **M0 decision:** Checkpoint 2 accepts only `Version` and a distribution-rooted `StaticFS`; `New` returns `(http.Handler, error)` so asset readiness is established before listening.
+- **Reason:** Configuration and workspace discovery belong to `internal/app`, while the development proxy is deferred to Checkpoint 4. Returning readiness errors prevents a production server from starting without its shell.
+- **Potential downstream impact:** Later checkpoints will add only concrete HTTP dependencies as their routes and development mode arrive.
+- **Reconciliation:** Revisit the planned options shape after M0 exposes all of its HTTP modes.

@@ -23,6 +23,7 @@ func TestServeCommandPassesOptionsToApplication(t *testing.T) {
 	require.NotNil(t, got.PortOverride)
 	assert.Equal(t, 8123, *got.PortOverride)
 	assert.True(t, got.Dev)
+	assert.Equal(t, Version, got.Version)
 }
 
 func TestServeCommandUsesProductionDefaults(t *testing.T) {
@@ -35,6 +36,7 @@ func TestServeCommandUsesProductionDefaults(t *testing.T) {
 	require.NoError(t, command.Execute())
 	assert.Nil(t, got.PortOverride)
 	assert.False(t, got.Dev)
+	assert.Equal(t, Version, got.Version)
 }
 
 func TestServeCommandPreservesZeroPortOverride(t *testing.T) {
