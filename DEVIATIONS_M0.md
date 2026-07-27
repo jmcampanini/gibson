@@ -16,6 +16,10 @@ This ledger records design deviations discovered while implementing M0. The exis
 - We do not inspect `.gitignore` coverage at runtime.
 - We will reconcile these differences with the existing plans after M0 is complete.
 
+## Checkpoint 5 evaluation
+
+The complete ledger was audited against the integrated M0 implementation. D-001 through D-006 and D-008 through D-010 accurately describe the working design and are accepted for M0. Owner evaluation explicitly accepted D-007's silent handling of unknown configuration keys and D-011's omission of runtime Git-ignore inspection. Plan and convention changes remain deferred to the separate post-acceptance reconciliation pass.
+
 ## D-001 — Application orchestration
 
 - **Planned design:** `cmd/serve.go` owns the `serve` startup workflow; M1 similarly places its one-shot workflow in `cmd/run.go`.

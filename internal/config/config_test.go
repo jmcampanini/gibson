@@ -39,7 +39,6 @@ extra_args = ["-e", "/opt/pi/review.ts"]
 			ExtraArgs:   []string{"-e", "/opt/pi/review.ts"},
 		},
 	}, cfg.Sessions)
-	require.NoError(t, cfg.Validate())
 }
 
 func TestLoadMinimalConfigAppliesDefaults(t *testing.T) {

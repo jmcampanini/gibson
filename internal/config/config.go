@@ -55,10 +55,6 @@ func Load(checkoutRoot string) (Config, error) {
 	return cfg, nil
 }
 
-func (c Config) Validate() error {
-	return c.validate(c.Server.Port != 0)
-}
-
 func (c Config) validate(portDefined bool) error {
 	if !portDefined {
 		return errors.New("gibson.toml: server.port is required")
