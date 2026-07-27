@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,10 +52,6 @@ func Serve(ctx context.Context, options ServeOptions, logger *log.Logger) error 
 }
 
 func serve(ctx context.Context, options ServeOptions, logger *log.Logger, dependencies serveDependencies) error {
-	if options.Dev {
-		return errors.New("development serving is not available yet")
-	}
-
 	workingDirectory, err := dependencies.getwd()
 	if err != nil {
 		return fmt.Errorf("determine working directory: %w", err)
@@ -96,15 +93,22 @@ func serve(ctx context.Context, options ServeOptions, logger *log.Logger, depend
 		)
 	}
 
-	static, err := fs.Sub(dependencies.assets, "dist")
-	if err != nil {
-		return embeddedAssetsError(err)
+	httpOptions := httpapi.Options{Version: options.Version}
+	if options.Dev {
+		httpOptions.DevProxy = &url.URL{Scheme: "http", Host: "localhost:5173"}
+	} else {
+		static, err := fs.Sub(dependencies.assets, "dist")
+		if err != nil {
+			return embeddedAssetsError(err)
+		}
+		httpOptions.StaticFS = static
 	}
-	handler, err := httpapi.New(httpapi.Options{
-		StaticFS: static,
-		Version:  options.Version,
-	})
+
+	handler, err := httpapi.New(httpOptions)
 	if err != nil {
+		if options.Dev {
+			return fmt.Errorf("configure development proxy: %w", err)
+		}
 		return embeddedAssetsError(err)
 	}
 

@@ -5,17 +5,19 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
 type Options struct {
 	Version  string
 	StaticFS fs.FS
+	DevProxy *url.URL
 }
 
 type server struct {
-	version string
-	spa     http.Handler
+	version  string
+	frontend http.Handler
 }
 
 type healthResponse struct {
@@ -33,16 +35,26 @@ type apiError struct {
 }
 
 func New(options Options) (http.Handler, error) {
-	if options.StaticFS == nil {
-		return nil, fmt.Errorf("static filesystem is required")
+	if options.StaticFS != nil && options.DevProxy != nil {
+		return nil, fmt.Errorf("static filesystem and development proxy are mutually exclusive")
 	}
 
-	spa, err := newSPAHandler(options.StaticFS)
-	if err != nil {
-		return nil, err
+	var frontend http.Handler
+	if options.DevProxy != nil {
+		frontend = newDevProxy(options.DevProxy)
+	} else {
+		if options.StaticFS == nil {
+			return nil, fmt.Errorf("static filesystem or development proxy is required")
+		}
+
+		spa, err := newSPAHandler(options.StaticFS)
+		if err != nil {
+			return nil, err
+		}
+		frontend = spa
 	}
 
-	return &server{version: options.Version, spa: spa}, nil
+	return &server{version: options.Version, frontend: frontend}, nil
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +68,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.spa.ServeHTTP(w, r)
+	s.frontend.ServeHTTP(w, r)
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

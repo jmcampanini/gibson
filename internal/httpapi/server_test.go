@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 
@@ -17,24 +19,28 @@ var testStaticFS = fstest.MapFS{
 	"assets/app.js": &fstest.MapFile{Data: []byte("globalThis.gibson = true")},
 }
 
-func TestNewRequiresReadyIndex(t *testing.T) {
+func TestNewRequiresOneReadyFrontend(t *testing.T) {
 	t.Parallel()
 
-	tests := map[string]fs.FS{
-		"nil filesystem": nil,
-		"missing index": fstest.MapFS{
+	tests := map[string]Options{
+		"no frontend": {},
+		"missing production index": {StaticFS: fstest.MapFS{
 			"assets/app.js": &fstest.MapFile{Data: []byte("asset")},
-		},
-		"index is directory": fstest.MapFS{
+		}},
+		"production index is directory": {StaticFS: fstest.MapFS{
 			"index.html": &fstest.MapFile{Mode: fs.ModeDir},
+		}},
+		"both frontends": {
+			StaticFS: testStaticFS,
+			DevProxy: &url.URL{Scheme: "http", Host: "localhost:5173"},
 		},
 	}
 
-	for name, static := range tests {
+	for name, options := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			handler, err := New(Options{StaticFS: static})
+			handler, err := New(options)
 			require.Error(t, err)
 			assert.Nil(t, handler)
 		})
@@ -53,6 +59,37 @@ func TestHealth(t *testing.T) {
 	var body healthResponse
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
 	assert.Equal(t, healthResponse{OK: true, Version: "test-version"}, body)
+}
+
+func TestDevelopmentProxyRoutesOnlyNonAPITraffic(t *testing.T) {
+	t.Parallel()
+
+	var proxied atomic.Int32
+	vite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxied.Add(1)
+		_, _ = w.Write([]byte("vite:" + r.URL.RequestURI()))
+	}))
+	t.Cleanup(vite.Close)
+	target, err := url.Parse(vite.URL)
+	require.NoError(t, err)
+
+	handler, err := New(Options{Version: "dev-version", DevProxy: target})
+	require.NoError(t, err)
+
+	response := request(handler, http.MethodGet, "/@vite/client?direct")
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, "vite:/@vite/client?direct", response.Body.String())
+	assert.EqualValues(t, 1, proxied.Load())
+
+	response = request(handler, http.MethodGet, "/api/health")
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.JSONEq(t, `{"ok":true,"version":"dev-version"}`, response.Body.String())
+	assert.EqualValues(t, 1, proxied.Load())
+
+	response = request(handler, http.MethodGet, "/api/unknown")
+	require.Equal(t, http.StatusNotFound, response.Code)
+	assert.Equal(t, "application/json", response.Header().Get("Content-Type"))
+	assert.EqualValues(t, 1, proxied.Load())
 }
 
 func TestUnknownAPIReturnsJSONNotFound(t *testing.T) {

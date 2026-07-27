@@ -77,10 +77,10 @@ This ledger records design deviations discovered while implementing M0. The exis
 ## D-008 — HTTP server inputs
 
 - **Planned design:** `httpapi.Options` carries configuration, workspace, version, static assets, and an optional development proxy, and `httpapi.New` always returns a handler.
-- **M0 decision:** Checkpoint 2 accepts only `Version` and a distribution-rooted `StaticFS`; `New` returns `(http.Handler, error)` so asset readiness is established before listening.
-- **Reason:** Configuration and workspace discovery belong to `internal/app`, while the development proxy is deferred to Checkpoint 4. Returning readiness errors prevents a production server from starting without its shell.
-- **Potential downstream impact:** Later checkpoints will add only concrete HTTP dependencies as their routes and development mode arrive.
-- **Reconciliation:** Revisit the planned options shape after M0 exposes all of its HTTP modes.
+- **M0 decision:** `httpapi.Options` carries `Version` and exactly one frontend input: a distribution-rooted `StaticFS` for production or a development proxy URL. Configuration and workspace remain application concerns. `New` returns `(http.Handler, error)` so the selected frontend is validated before listening.
+- **Reason:** The HTTP layer needs only values that affect its routes. Explicit, mutually exclusive frontend inputs keep production asset readiness separate from development proxying without coupling HTTP routing to startup discovery.
+- **Potential downstream impact:** Later HTTP routes can add their concrete dependencies without moving configuration or workspace orchestration out of `internal/app`.
+- **Reconciliation:** Revisit the options shape and error-returning constructor after M0 exposes all of its HTTP modes.
 
 ## D-009 — Operational logging library
 

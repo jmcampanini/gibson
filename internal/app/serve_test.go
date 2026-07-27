@@ -85,6 +85,42 @@ description = "Test session"
 	requireServeStops(t, result)
 }
 
+func TestServeDevelopmentModeSkipsEmbeddedAssets(t *testing.T) {
+	ws := testws.New(t)
+	pi := writeVersionPi(t, "0.82.1")
+	ws.WriteConfig(t, fmt.Sprintf(`
+[server]
+port = 7311
+pi_bin = %q
+
+[sessions.test]
+description = "Test session"
+`, pi))
+
+	listener := newTestListener(t)
+	dependencies := testServeDependencies()
+	dependencies.assets = fstest.MapFS{
+		"dist.bootstrap": &fstest.MapFile{Data: []byte("embed sentinel")},
+	}
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	dependencies.listen = func(_, _ string) (net.Listener, error) { return listener, nil }
+	var logs bytes.Buffer
+	logger := log.New(&logs)
+	port := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	result := make(chan error, 1)
+	go func() {
+		result <- serve(ctx, ServeOptions{PortOverride: &port, Dev: true, Version: "dev-version"}, logger, dependencies)
+	}()
+
+	requireHealth(t, listener.Addr(), "dev-version")
+	assert.Contains(t, logs.String(), "dev=true")
+
+	cancel()
+	requireServeStops(t, result)
+}
+
 func TestServeWarningsDoNotPreventServing(t *testing.T) {
 	ws := testws.New(t)
 	pi := writeVersionPi(t, "0.83.0")
