@@ -1,0 +1,17 @@
+# Agent scratch paths
+.claude/
+.claude-plans/
+.claude-sandbox/
+.codex-*
+.sandbox/
+
+# Local build artifacts
+/build/
+/web/dist/
+node_modules/
+.gibson/
+
+# Coverage output
+/coverage.out
+/coverage.html
+*.coverprofile

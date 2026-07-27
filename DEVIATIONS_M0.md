@@ -8,6 +8,7 @@ This ledger records design deviations discovered while implementing M0. The exis
 - We made future-facing interfaces provisional so working code, not speculative consumers, shapes M0's APIs.
 - We chose contract-focused tests to preserve confidence without duplicating every assertion across layers.
 - We changed the binary output from `bin/gibson` to `build/gibson` to match Command K and Overlay conventions.
+- We deferred the functional `make web` target until the web project exists in Checkpoint 2.
 - We will reconcile these differences with the existing plans after M0 is complete.
 
 ## D-001 — Application orchestration
@@ -43,3 +44,11 @@ This ledger records design deviations discovered while implementing M0. The exis
 - **Reason:** `build/<binary>` is the shared convention in Command K and Overlay and remains clearly distinct from Vite's `web/dist/` output.
 - **Potential downstream impact:** M0 and later proof commands, ignore rules, and scripts that name `bin/gibson` will require reconciliation.
 - **Reconciliation:** Deferred until the end of M0.
+
+## D-005 — Web Make target sequencing
+
+- **Planned design:** The initial Makefile exposes `make web` before the web project is scaffolded.
+- **M0 decision:** Checkpoint 1 exposes only functional targets. Checkpoint 2 will add `make web` with the React/Vite scaffold and make the production build depend on it.
+- **Reason:** A no-op target would claim to build assets it does not produce, while the real recipe cannot work before `web/package.json` exists.
+- **Potential downstream impact:** Checkpoint 2 must add the target before any production embed build is introduced.
+- **Reconciliation:** Revisit the planned implementation order after M0 is complete.
