@@ -1,4 +1,4 @@
-.PHONY: help web build test cli-proof lint lint-fix fmt fmt-check tidy tidy-check check verify clean
+.PHONY: help dev-web dev-server web build test cli-proof lint lint-fix fmt fmt-check tidy tidy-check check verify clean
 
 BUILD_DIR        := build
 BINARY           := $(BUILD_DIR)/gibson
@@ -18,6 +18,12 @@ help: ## Show this help.
 
 $(WEB_INSTALL_MARK): $(WEB_DIR)/package.json $(WEB_DIR)/package-lock.json
 	npm ci --prefix $(WEB_DIR)
+
+dev-web: $(WEB_INSTALL_MARK) ## Run the Vite development server.
+	npm run dev --prefix $(WEB_DIR)
+
+dev-server: ## Run Gibson with the Vite development proxy.
+	go run $(LDFLAGS) $(CMD) serve --dev
 
 web: $(WEB_INSTALL_MARK) ## Build the production web application.
 	npm run build --prefix $(WEB_DIR)
