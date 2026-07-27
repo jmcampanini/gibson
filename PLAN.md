@@ -22,7 +22,7 @@ its implementation into reviewable chunks without changing its scope.
 
 ## Progress
 
-- [ ] Chunk 1 — Reliable pi test environment
+- [x] Chunk 1 — Reliable pi test environment
 - [ ] Chunk 2 — Correct RPC transport and launch arguments
 - [ ] Chunk 3 — Basic live pi session
 - [ ] Chunk 4 — Session lifecycle resilience
@@ -37,15 +37,15 @@ its implementation into reviewable chunks without changing its scope.
 Create a deterministic substitute for pi so later work can exercise real subprocess,
 JSONL, and session-file boundaries without requiring a network or LLM.
 
-- [ ] Let scratch workspaces configure a pi binary, session types, and sibling checkouts
+- [x] Let scratch workspaces configure a pi binary, session types, and sibling checkouts
   while preserving their current zero-option behavior.
-- [ ] Build a fake pi executable that reports the verified pi version and speaks enough
+- [x] Build a fake pi executable that reports the verified pi version and speaks enough
   RPC for a basic session.
-- [ ] Make the basic scenario accept a prompt, emit a realistic event sequence, and write
+- [x] Make the basic scenario accept a prompt, emit a realistic event sequence, and write
   a valid v3 session file with a consistent entry chain.
-- [ ] Provide one reusable helper that builds fake pi and another that enables real-pi
+- [x] Provide one reusable helper that builds fake pi and another that enables real-pi
   checks only when explicitly requested.
-- [ ] Keep later slow-stream, large-entry, crash, and dialog scenarios out until Chunk 4
+- [x] Keep later slow-stream, large-entry, crash, and dialog scenarios out until Chunk 4
   needs them.
 
 ### Dependencies
@@ -54,15 +54,15 @@ The completed M0 test workspace, configuration, and pi-version behavior.
 
 ### Verification criteria
 
-- [ ] Fake pi builds once and answers both `--version` and a readiness request correctly.
-- [ ] Its basic run writes a valid session header and ordered entries.
-- [ ] Existing scratch-workspace behavior remains unchanged when no options are supplied.
-- [ ] Default verification requires neither a network nor an LLM.
-- [ ] `make check` passes.
+- [x] Fake pi builds once and answers both `--version` and a readiness request correctly.
+- [x] Its basic run writes a valid session header and ordered entries.
+- [x] Existing scratch-workspace behavior remains unchanged when no options are supplied.
+- [x] Default verification requires neither a network nor an LLM.
+- [x] `make check` passes.
 
 ### Mandatory approval gate
 
-- [ ] Present Chunk 1's behavior and verification evidence, then receive explicit approval
+- [x] Present Chunk 1's behavior and verification evidence, then receive explicit approval
   before beginning Chunk 2.
 
 ## Chunk 2 — Correct RPC transport and launch arguments
