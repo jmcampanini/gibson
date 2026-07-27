@@ -52,7 +52,6 @@ func Load(checkoutRoot string) (Config, error) {
 	if err := cfg.validate(metadata.IsDefined("server", "port")); err != nil {
 		return Config{}, err
 	}
-
 	return cfg, nil
 }
 
