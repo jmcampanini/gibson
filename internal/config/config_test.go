@@ -23,9 +23,11 @@ thinking = "high"
 extra_args = ["-e", "/opt/pi/review.ts"]
 `)
 
-	cfg, err := Load(root)
+	result, err := Load(root)
 	require.NoError(t, err)
+	cfg := result.Config
 
+	assert.Empty(t, result.UnknownKeys)
 	assert.Equal(t, Server{
 		Port:  7311,
 		Bind:  "0.0.0.0",
@@ -45,22 +47,22 @@ extra_args = ["-e", "/opt/pi/review.ts"]
 func TestLoadMinimalConfigAppliesDefaults(t *testing.T) {
 	root := writeTestConfig(t, "[server]\nport = 7311\n")
 
-	cfg, err := Load(root)
+	result, err := Load(root)
 	require.NoError(t, err)
 
-	assert.Equal(t, "127.0.0.1", cfg.Server.Bind)
-	assert.Empty(t, cfg.Server.PiBin)
-	assert.NotNil(t, cfg.Sessions)
-	assert.Empty(t, cfg.Sessions)
+	assert.Equal(t, "127.0.0.1", result.Config.Server.Bind)
+	assert.Empty(t, result.Config.Server.PiBin)
+	assert.NotNil(t, result.Config.Sessions)
+	assert.Empty(t, result.Config.Sessions)
 }
 
 func TestLoadTreatsEmptyBindAsLoopbackDefault(t *testing.T) {
 	root := writeTestConfig(t, "[server]\nport = 7311\nbind = \"\"\n")
 
-	cfg, err := Load(root)
+	result, err := Load(root)
 	require.NoError(t, err)
 
-	assert.Equal(t, "127.0.0.1", cfg.Server.Bind)
+	assert.Equal(t, "127.0.0.1", result.Config.Server.Bind)
 }
 
 func TestLoadRequiresConfigAtCheckoutRoot(t *testing.T) {
@@ -165,9 +167,28 @@ extra_args = [
 ]
 `)
 
-	cfg, err := Load(root)
+	result, err := Load(root)
 	require.NoError(t, err)
-	assert.Equal(t, extraArgs, cfg.Sessions["opaque"].ExtraArgs)
+	assert.Equal(t, extraArgs, result.Config.Sessions["opaque"].ExtraArgs)
+}
+
+func TestLoadReturnsSortedUnknownKeyPathsWithValidConfig(t *testing.T) {
+	root := writeTestConfig(t, `
+[server]
+port = 7311
+zebra = true
+
+[sessions.review]
+description = "Code review"
+alpha = "unknown"
+`)
+
+	result, err := Load(root)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"server.zebra", "sessions.review.alpha"}, result.UnknownKeys)
+	assert.Equal(t, 7311, result.Config.Server.Port)
+	assert.Equal(t, "Code review", result.Config.Sessions["review"].Description)
 }
 
 func writeTestConfig(t *testing.T, contents string) string {
