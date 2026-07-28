@@ -23,8 +23,8 @@ its implementation into reviewable chunks without changing its scope.
 ## Progress
 
 - [x] Chunk 1 — Reliable pi test environment
-- [ ] Chunk 2 — Correct RPC transport and launch arguments
-- [ ] Chunk 3 — Basic live pi session
+- [x] Chunk 2 — Correct RPC transport and launch arguments
+- [x] Chunk 3 — Basic live pi session
 - [ ] Chunk 4 — Session lifecycle resilience
 - [ ] Chunk 5 — Durable session records and checkout targeting
 - [ ] Chunk 6 — Complete one-shot run workflow
@@ -72,14 +72,14 @@ The completed M0 test workspace, configuration, and pi-version behavior.
 Build the protocol layer that exchanges JSONL commands, responses, and events with pi
 without corrupting records or interleaving concurrent writes.
 
-- [ ] Read records by LF only while accepting CRLF and a final unterminated record.
-- [ ] Preserve embedded Unicode line separators and records larger than 1 MB.
-- [ ] Route every outbound write through one serializer.
-- [ ] Correlate command responses by ID, including out-of-order replies, command failures,
+- [x] Read records by LF only while accepting CRLF and a final unterminated record.
+- [x] Preserve embedded Unicode line separators and records larger than 1 MB.
+- [x] Route every outbound write through one serializer.
+- [x] Correlate command responses by ID, including out-of-order replies, command failures,
   timeouts, and late unmatched responses.
-- [ ] Forward non-response records as untouched events and apply bounded backpressure
+- [x] Forward non-response records as untouched events and apply bounded backpressure
   rather than dropping them.
-- [ ] Assemble pi launch arguments in the required order, omitting unset options and
+- [x] Assemble pi launch arguments in the required order, omitting unset options and
   preserving extra arguments verbatim at the end.
 
 ### Dependencies
@@ -88,17 +88,17 @@ Chunk 1's deterministic test environment and the existing pi-version package.
 
 ### Verification criteria
 
-- [ ] Chunked, CRLF, Unicode-separator, large-record, and EOF framing cases all retain
+- [x] Chunked, CRLF, Unicode-separator, large-record, and EOF framing cases all retain
   their exact JSON payloads.
-- [ ] Concurrent commands cannot interleave bytes and can resolve in any response order.
-- [ ] Timeouts and pi-declared failures surface as the correct errors without forwarding
+- [x] Concurrent commands cannot interleave bytes and can resolve in any response order.
+- [x] Timeouts and pi-declared failures surface as the correct errors without forwarding
   responses as events.
-- [ ] Launch arguments exactly match the M1 contract for every optional-value combination.
-- [ ] `make check` passes.
+- [x] Launch arguments exactly match the M1 contract for every optional-value combination.
+- [x] `make check` passes.
 
 ### Mandatory approval gate
 
-- [ ] Present Chunk 2's behavior and verification evidence, then receive explicit approval
+- [x] Present Chunk 2's behavior and verification evidence, then receive explicit approval
   before beginning Chunk 3.
 
 ## Chunk 3 — Basic live pi session
@@ -108,13 +108,13 @@ Chunk 1's deterministic test environment and the existing pi-version package.
 Wrap the transport in a process-backed session that can complete and persist a normal
 one-shot interaction.
 
-- [ ] Start pi in the target checkout with inherited environment and captured stderr.
-- [ ] Start protocol processing, use `get_state` as the readiness probe, and return only
+- [x] Start pi in the target checkout with inherited environment and captured stderr.
+- [x] Start protocol processing, use `get_state` as the readiness probe, and return only
   after pi is ready.
-- [ ] Expose the M1 typed command surface while preserving pi-owned data as raw JSON.
-- [ ] Prompt the basic fake-pi scenario and consume its events through `agent_settled`.
-- [ ] Expose process identity, completion, and exit information safely.
-- [ ] Shut down with SIGTERM first, reap the process, and close event delivery only after
+- [x] Expose the M1 typed command surface while preserving pi-owned data as raw JSON.
+- [x] Prompt the basic fake-pi scenario and consume its events through `agent_settled`.
+- [x] Expose process identity, completion, and exit information safely.
+- [x] Shut down with SIGTERM first, reap the process, and close event delivery only after
   final exit information is available.
 
 ### Dependencies
@@ -123,13 +123,13 @@ Chunks 1–2.
 
 ### Verification criteria
 
-- [ ] A basic session completes from spawn through readiness, prompt acceptance,
+- [x] A basic session completes from spawn through readiness, prompt acceptance,
   settlement, and shutdown.
-- [ ] Typed commands return the expected data without remodeling pi payloads.
-- [ ] Event order and raw payloads survive the subprocess boundary.
-- [ ] The session file is valid and the stderr destination is closed after process exit.
-- [ ] No process or goroutine remains after clean shutdown.
-- [ ] `make check` passes.
+- [x] Typed commands return the expected data without remodeling pi payloads.
+- [x] Event order and raw payloads survive the subprocess boundary.
+- [x] The session file is valid and the stderr destination is closed after process exit.
+- [x] No process or goroutine remains after clean shutdown.
+- [x] `make check` passes.
 
 ### Mandatory approval gate
 

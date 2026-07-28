@@ -301,9 +301,35 @@ func (p *fakePi) handleLine(line []byte) error {
 		return p.acceptPrompt(id, command, fields)
 	case "abort":
 		return p.writeResponse(p.success(id, command, nil))
+	case "extension_ui_response":
+		return p.acceptUIResponse(fields)
 	default:
 		return p.writeResponse(p.failure(id, command, fmt.Sprintf("unsupported command: %s", command)))
 	}
+}
+
+func (p *fakePi) acceptUIResponse(fields map[string]json.RawMessage) error {
+	valid := false
+	if raw, ok := fields["value"]; ok {
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return errors.New("extension_ui_response value must be a string")
+		}
+		valid = true
+	}
+	for _, name := range []string{"confirmed", "cancelled"} {
+		if raw, ok := fields[name]; ok {
+			var value bool
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return fmt.Errorf("extension_ui_response %s must be a boolean", name)
+			}
+			valid = true
+		}
+	}
+	if !valid {
+		return errors.New("extension_ui_response requires a resolution")
+	}
+	return nil
 }
 
 func (p *fakePi) stateData() map[string]any {
