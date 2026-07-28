@@ -19,16 +19,24 @@ its implementation into reviewable chunks without changing its scope.
 - Do not create commits unless requested.
 - Keep HTTP, SSE, the session manager, browser work, resume behavior, and full dialog UX
   out of M1.
+- Keep `gibson run <type> <message>` as a permanent one-shot terminal and debugging tool:
+  it starts pi, submits one message, streams one answer, persists the session, stops pi,
+  and exits. It does not provide a follow-up prompt loop.
+- Treat `<type>` as the name of a user-configured `[sessions.<type>]` table. `quick` is
+  only an example configuration name, not a built-in or temporary Gibson mode.
+- Deliver sustained conversations in later milestones through `gibson serve`, the session
+  manager, and the browser rather than by turning `gibson run` into another mode.
 
 ## Progress
 
 - [x] Chunk 1 — Reliable pi test environment
 - [x] Chunk 2 — Correct RPC transport and launch arguments
 - [x] Chunk 3 — Basic live pi session
-- [ ] Chunk 4 — Session lifecycle resilience
-- [ ] Chunk 5 — Durable session records and checkout targeting
-- [ ] Chunk 6 — Complete one-shot run workflow
-- [ ] Chunk 7 — CLI boundary and complete M1 proof
+- [ ] Chunk 4 — First human-drivable run
+- [ ] Chunk 5 — Interruptible and crash-safe runs
+- [ ] Chunk 6 — Named-checkout runs and storage hardening
+- [ ] Chunk 7 — Hostile records and extension boundaries
+- [ ] Chunk 8 — Complete M1 acceptance
 
 ## Chunk 1 — Reliable pi test environment
 
@@ -45,8 +53,8 @@ JSONL, and session-file boundaries without requiring a network or LLM.
   a valid v3 session file with a consistent entry chain.
 - [x] Provide one reusable helper that builds fake pi and another that enables real-pi
   checks only when explicitly requested.
-- [x] Keep later slow-stream, large-entry, crash, and dialog scenarios out until Chunk 4
-  needs them.
+- [x] Keep later slow-stream, large-entry, crash, and dialog scenarios out until the
+  chunks that exercise them.
 
 ### Dependencies
 
@@ -136,25 +144,37 @@ Chunks 1–2.
 - [ ] Present Chunk 3's behavior and verification evidence, then receive explicit approval
   before beginning Chunk 4.
 
-## Chunk 4 — Session lifecycle resilience
+## Chunk 4 — First human-drivable run
 
 ### Objective and tasks
 
-Make a live session safe under interruption, blocking UI requests, large records,
-unexpected exits, and repeated shutdown attempts.
+Deliver the first meaningful M1 capability outside internal tests: a human can invoke the
+compiled `gibson run <type> <message>` command in the launch checkout, watch one answer
+stream, and inspect the durable result after Gibson exits.
 
-- [ ] Abort an active turn while continuing to consume events until the aborted assistant
-  message is durable and the agent settles.
-- [ ] Send extension UI responses through the shared writer without waiting for a reply.
-- [ ] Fail pending commands consistently when pi exits or a command times out.
-- [ ] Make close idempotent and escalate from SIGTERM to SIGKILL only after the graceful
-  timeout.
-- [ ] Guarantee that shutdown can unblock a full event channel and preserve deterministic
-  pump, reap, completion, and channel-close ordering.
-- [ ] Add slow-stream, large-entry, crash, and blocking-dialog fake-pi scenarios alongside
-  the behavior that consumes them.
-- [ ] Capture useful crash diagnostics in the session's stderr log.
-- [ ] Add the opt-in real-pi protocol check without issuing a prompt or incurring LLM cost.
+- [ ] Add final-shaped core storage under the launch checkout: the `.gibson/sessions/` and
+  `.gibson/logs/` layout, readable cryptographically random pi-compatible session IDs, and
+  an in-process-serialized, atomically replaced versioned registry with session identity,
+  configured type, timestamps, status, and diagnostic PID.
+- [ ] Add `internal/app/run.go` to locate the workspace, load validated configuration,
+  resolve the configured session type, resolve and check pi, create the session, prompt
+  once, drain through `agent_settled`, and always stop the process.
+- [ ] Add `gibson run <type> <message>` as a thin Cobra adapter without changing `serve`;
+  do not add `--checkout` until Chunk 6.
+- [ ] Stream only assistant text deltas to stdout, adding a trailing newline only when
+  needed, and send session details, tool activity, notifications, errors, and a visible
+  blocking-dialog warning to stderr.
+- [ ] Record the process as live after spawn, update activity when work becomes durable,
+  and leave every completed one-shot stopped, resumable later, and with PID zero.
+- [ ] Map normal, failed, and interrupted outcomes to exit codes 0, 1, and 130 while
+  preserving exactly one top-level presentation of failures.
+- [ ] On Ctrl+C, safely close immediately and exit 130 for this first slice; defer graceful
+  durable abort and second-interrupt semantics to Chunk 5.
+- [ ] Add the opt-in real-pi lifecycle check without issuing a prompt or incurring LLM cost.
+
+The storage packages and on-disk schema introduced here are the final M1 shape. Early runs
+remain disposable while collision, leftover-temp-file, exhaustive transition, and hostile
+permission hardening are deliberately deferred to Chunk 6.
 
 ### Dependencies
 
@@ -162,78 +182,86 @@ Chunks 1–3.
 
 ### Verification criteria
 
-- [ ] Abort stops further deltas, persists an aborted assistant entry, and reaches
-  `agent_settled`.
-- [ ] A UI response releases a blocked fake-pi dialog.
-- [ ] A record larger than 1 MB survives the complete process boundary intact.
-- [ ] A crash fails pending work, records exit information, closes event delivery last,
-  and preserves stderr diagnostics.
-- [ ] Repeated close calls neither leak nor double-reap the process.
+- [ ] Root help exposes `run`; a configured type completes one prompt through the compiled
+  binary and streams the expected assistant text.
+- [ ] `quick`, when used in a proof, comes from `[sessions.quick]`; an unknown type fails
+  clearly, lists configured types, and does not spawn pi.
+- [ ] The session JSONL, registry record, and stderr log have matching identity and remain
+  under the launch checkout's `.gibson/` directory.
+- [ ] Normal completion exits 0 with stopped status and PID zero; a basic failure exits 1;
+  an interrupt exits 130 and leaves no matching pi process.
+- [ ] Stdout remains pipeable assistant text while human diagnostics remain on stderr.
+- [ ] Blocking dialogs produce a visible warning that `gibson run` cannot answer them.
 - [ ] The opt-in no-prompt real-pi lifecycle check passes when enabled.
+- [ ] Generated `.gibson/` state causes no Git status noise.
 - [ ] `make check` passes.
 
 ### Mandatory approval gate
 
-- [ ] Present Chunk 4's behavior and verification evidence, then receive explicit approval
-  before beginning Chunk 5.
+- [ ] Present the compiled one-shot command, its artifacts, and verification evidence, then
+  receive explicit approval before beginning Chunk 5.
 
-## Chunk 5 — Durable session records and checkout targeting
+## Chunk 5 — Interruptible and crash-safe runs
 
 ### Objective and tasks
 
-Give each checkout self-contained session storage and let a run target a named sibling
-checkout without pulling full worktree enumeration into M1.
+Make the one-shot command trustworthy during slow work, repeated interruption, unexpected
+pi exit, and repeated cleanup without expanding it into a sustained conversation.
 
-- [ ] Create the required sessions and logs layout under the target checkout.
-- [ ] Generate readable, pi-compatible session IDs with cryptographic randomness and
-  regenerate after collisions with either registry or session data.
-- [ ] Persist the versioned registry with atomic replacement and in-process serialization.
-- [ ] Record live, stopped, and closed states with activity timestamps and a diagnostic PID.
-- [ ] Find a pi session file by reading its header ID rather than depending on its filename.
-- [ ] Resolve a named sibling checkout beneath the workspace root and accept either a Git
-  directory or linked-worktree marker.
+- [ ] Add slow-stream and crash fake-pi scenarios that exercise real subprocess timing and
+  failure boundaries.
+- [ ] On the first interrupt, send `abort`, keep draining until the aborted assistant
+  message is durable and the agent settles, then stop and exit 130.
+- [ ] On a second interrupt, force immediate shutdown and exit 130.
+- [ ] Fail pending commands consistently when pi exits or a command times out.
+- [ ] Make close idempotent and escalate from SIGTERM to SIGKILL only after the graceful
+  timeout.
+- [ ] Guarantee shutdown can unblock a full event channel while preserving deterministic
+  pump, reap, completion, and channel-close ordering.
+- [ ] Preserve useful pi stderr diagnostics on crashes and clear the registry PID on every
+  normal, aborted, forced, or failed exit path.
 
 ### Dependencies
 
-Chunks 1–4, including realistic fake-pi session files.
+Chunks 1–4, including the complete one-shot application workflow and storage lifecycle.
 
 ### Verification criteria
 
-- [ ] Storage paths and permissions match the M1 contract.
-- [ ] Leftover temporary files cannot replace or corrupt the readable registry.
-- [ ] IDs match the required format and regenerate on every collision source.
-- [ ] Registry updates preserve metadata and enforce the intended status transitions.
-- [ ] Session files are found by identity even when filenames are opaque.
-- [ ] Ordinary repositories and linked worktrees resolve correctly; invalid names and
-  non-checkouts fail clearly.
-- [ ] `make check` passes.
+- [ ] A first interrupt stops further deltas, persists an assistant entry with
+  `stopReason:"aborted"`, reaches `agent_settled`, exits 130, and leaves no orphan.
+- [ ] A second interrupt forces prompt shutdown, exits 130, clears the PID, and leaves no
+  orphan.
+- [ ] A crash exits 1, fails pending work, records final exit information, closes event
+  delivery last, preserves a useful stderr tail, and leaves stopped registry state.
+- [ ] Repeated close calls neither leak, double-reap, nor corrupt completion state.
+- [ ] Slow, crashed, and interrupted runs keep stdout and stderr within their contracts.
+- [ ] `make check` passes, including repeated, shuffled, and race-enabled lifecycle tests.
 
 ### Mandatory approval gate
 
-- [ ] Present Chunk 5's behavior and verification evidence, then receive explicit approval
-  before beginning Chunk 6.
+- [ ] Present interrupt and crash behavior with process, session, registry, and log
+  evidence, then receive explicit approval before beginning Chunk 6.
 
-## Chunk 6 — Complete one-shot run workflow
+## Chunk 6 — Named-checkout runs and storage hardening
 
 ### Objective and tasks
 
-Compose the lower layers into the headless M1 capability: resolve a configured session
-type, run one prompt, stream useful terminal output, and leave a durable resumable session.
+Extend the same one-shot command to a named sibling checkout and finish the adversarial
+storage guarantees deferred from the first human-drivable slice.
 
-- [ ] Locate the workspace, load validated configuration, and resolve the requested session
-  type and target checkout.
-- [ ] Resolve and check pi before spawning, including the existing warning for an
-  unverified newer version.
-- [ ] Create storage, assign an ID, spawn pi, and record the live process.
-- [ ] Submit the prompt and drain events until the agent settles.
-- [ ] Write only assistant text deltas to stdout and add a final newline only when needed.
-- [ ] Send session details, tool activity, notifications, and blocking-dialog warnings to
-  stderr.
-- [ ] Update activity when prompts are accepted and messages become durable.
-- [ ] Handle normal completion, agent-reported errors, unexpected exits, and first or
-  second interrupts.
-- [ ] Always stop the process, clear its diagnostic PID, and leave the session resumable
-  with stopped status.
+- [ ] Add the final `--checkout <name>` flag, defaulting to the checkout from which Gibson
+  was launched.
+- [ ] Resolve a name as a sibling beneath the workspace root, reject traversal, and accept
+  either an ordinary Git directory or a linked-worktree `.git` marker without enumerating
+  all worktrees.
+- [ ] Keep the selected checkout self-contained: pi runs there and its session JSONL,
+  registry, and stderr log all live only under that checkout's `.gibson/` directory.
+- [ ] Detect session-ID collisions against both registry records and existing session-file
+  headers, regenerating after every collision.
+- [ ] Harden registry metadata preservation, exhaustive status transitions, file and
+  directory permissions, and interrupted or leftover temporary-file behavior.
+- [ ] Find pi session files by reading their header IDs rather than trusting filenames.
+- [ ] Reject unknown, missing, traversing, and non-Git targets before spawning pi.
 
 ### Dependencies
 
@@ -241,37 +269,42 @@ Chunks 1–5.
 
 ### Verification criteria
 
-- [ ] A basic run streams the expected assistant text and leaves valid session, log, and
-  registry artifacts.
-- [ ] A named-checkout run places every artifact inside that checkout.
-- [ ] Stdout remains pipeable assistant output while human diagnostics stay on stderr.
-- [ ] First interrupt aborts and settles cleanly; a second interrupt forces immediate
-  shutdown; both produce the interrupt outcome.
-- [ ] Crashes produce an error outcome, preserve diagnostics, update the registry, and
-  leave no orphan process.
-- [ ] Unknown session types and checkouts fail clearly without spawning pi.
+- [ ] `gibson run <type> <message> --checkout wt-x` runs in `wt-x` and places every
+  artifact only under `wt-x/.gibson/`.
+- [ ] Omitting `--checkout` preserves launch-checkout behavior.
+- [ ] Ordinary repositories and linked worktrees resolve correctly; invalid targets fail
+  clearly before pi starts.
+- [ ] Storage paths, formats, and permissions match the M1 contract.
+- [ ] IDs match the required format and regenerate for every collision source.
+- [ ] Leftover temporary files cannot replace or corrupt a readable registry.
+- [ ] Registry updates preserve metadata and enforce every intended status transition.
+- [ ] Session files are found by header identity even when filenames are opaque.
+- [ ] Generated state produces no Git status noise in either checkout.
 - [ ] `make check` passes.
 
 ### Mandatory approval gate
 
-- [ ] Present Chunk 6's behavior and verification evidence, then receive explicit approval
-  before beginning Chunk 7.
+- [ ] Present named-checkout isolation and hardened on-disk evidence, then receive explicit
+  approval before beginning Chunk 7.
 
-## Chunk 7 — CLI boundary and complete M1 proof
+## Chunk 7 — Hostile records and extension boundaries
 
 ### Objective and tasks
 
-Expose the workflow as `gibson run` and prove the finished milestone through the compiled
-binary and a real pi installation.
+Prove the completed one-shot path against protocol records and extension behavior most
+likely to corrupt a subprocess integration, while keeping full dialog UX outside M1.
 
-- [ ] Add `gibson run <type> <message> [--checkout <name>]` as a thin adapter to the
-  application workflow.
-- [ ] Register the command without changing the existing `serve` behavior.
-- [ ] Map successful, failed, and interrupted outcomes to process exit codes 0, 1, and 130.
-- [ ] Preserve exactly one top-level presentation of failures.
-- [ ] Exercise the compiled command in a scratch workspace for success, artifact
-  persistence, interruption, invalid input, and sibling-checkout targeting.
-- [ ] Confirm generated `.gibson` data remains ignored by Git.
+- [ ] Add fake-pi scenarios for a single record larger than 1 MB and for a blocking
+  extension confirmation dialog.
+- [ ] Prove large records, CRLF boundaries, final unterminated records, and embedded Unicode
+  line separators survive the complete process boundary without truncation or splitting.
+- [ ] Send extension UI responses through the shared writer without waiting for a command
+  reply, and prove at the process layer that a response releases a blocked fake-pi dialog.
+- [ ] Keep `gibson run` deliberately unable to answer dialogs; emit a loud warning for
+  blocking requests and let Ctrl+C follow Chunk 5's durable abort path.
+- [ ] Exercise tool activity, notifications, agent-reported errors, backpressure, and close
+  ordering through the composed application boundary.
+- [ ] Preserve raw pi-owned JSON and valid session files throughout every hostile scenario.
 
 ### Dependencies
 
@@ -279,16 +312,55 @@ Chunks 1–6.
 
 ### Verification criteria
 
-- [ ] Root help exposes `run`, and arguments and flags reach the application workflow
-  unchanged.
-- [ ] Exit codes and top-level error presentation match the M1 contract.
+- [ ] A valid record and resulting session file larger than 1 MB survive intact.
+- [ ] Unicode separators remain data rather than record boundaries across the subprocess.
+- [ ] A UI response releases the fake-pi dialog without corrupting concurrent protocol
+  writes.
+- [ ] A blocking-dialog run warns visibly, exits 130 after Ctrl+C, persists the aborted
+  state, and leaves no orphan process.
+- [ ] Tool, notification, and error diagnostics stay on stderr while stdout remains only
+  assistant text.
+- [ ] Full event-channel backpressure and shutdown ordering remain race-clean.
+- [ ] `make check` passes.
+
+### Mandatory approval gate
+
+- [ ] Present hostile-record and extension-boundary evidence, then receive explicit
+  approval before beginning Chunk 8.
+
+## Chunk 8 — Complete M1 acceptance
+
+### Objective and tasks
+
+Add no planned product capability. Validate the complete M1 contract from a clean
+workspace through the compiled binary and a real pi installation, correcting only defects
+that prevent the already-specified behavior from passing.
+
+- [ ] Run every repository formatting, module, lint, race, build, and CLI gate.
+- [ ] Run the gated no-prompt real-pi protocol lifecycle check.
+- [ ] Execute the complete numbered M1 acceptance workflow with a compiled Gibson binary,
+  scratch launch checkout, and sibling checkout.
+- [ ] Capture evidence for the real-prompt happy path, artifact identity, registry state,
+  graceful interruption, invalid inputs, checkout isolation, clean Git state, and absence
+  of orphan processes.
+- [ ] Sweep the implementation and plan against every M1 acceptance criterion without
+  pulling HTTP, SSE, session-manager, browser, resume, or full dialog UX work forward.
+
+### Dependencies
+
+Chunks 1–7.
+
+### Verification criteria
+
 - [ ] `make verify` passes.
 - [ ] `GIBSON_TEST_REAL_PI=1 go test ./internal/pisession/ -run RealPi -v` passes.
-- [ ] A real prompt streams successfully and creates a matching session file, registry
-  record, and stderr log.
-- [ ] Interrupt, unknown-type, and sibling-checkout proof cases pass without orphaned pi
-  processes.
-- [ ] `git status --porcelain` remains empty in every proof checkout.
+- [ ] A real one-shot prompt streams successfully and creates a matching session file,
+  registry record, and stderr log.
+- [ ] First and second interrupts, crashes, unknown types, invalid checkouts, large records,
+  and blocking dialogs satisfy their final M1 outcomes without orphaned pi processes.
+- [ ] Launch-checkout and sibling-checkout runs remain isolated and Git-clean.
+- [ ] Every numbered step in §8 of
+  `~/Code/github.com/jmcampanini/gibson/main/plans/MILESTONE_1.md` passes.
 
 ### Mandatory approval gate
 
@@ -297,7 +369,7 @@ Chunks 1–6.
 
 ## Agent-verified completion workflow
 
-After Chunk 7 is implemented, an agent must perform the following from
+After Chunk 8 is implemented, an agent must perform the following from
 `~/Code/github.com/jmcampanini/gibson/main`:
 
 1. Run `make verify` and require every formatting, module, lint, race, build, and CLI gate
@@ -307,9 +379,10 @@ After Chunk 7 is implemented, an agent must perform the following from
    no-prompt real-pi protocol check to pass.
 3. Execute every numbered step in §8 of
    `~/Code/github.com/jmcampanini/gibson/main/plans/MILESTONE_1.md` against the compiled
-   binary and a scratch workspace under `.sandbox/`.
+   binary and a clean scratch workspace under `.sandbox/`.
 4. Record evidence for the real-prompt happy path, on-disk identity and registry state,
-   clean interrupt with an aborted durable message, absence of orphan processes, clear
-   invalid-input failure, sibling-checkout isolation, and clean Git status.
-5. Present the evidence at Chunk 7's mandatory approval gate. M1 is not complete until
-   the agent workflow passes and receives explicit human approval.
+   first- and second-interrupt behavior, crash diagnostics, absence of orphan processes,
+   clear invalid-input failures, sibling-checkout isolation, hostile-record preservation,
+   dialog warnings, and clean Git status.
+5. Present the evidence at Chunk 8's mandatory approval gate. M1 is not complete until the
+   agent workflow passes and receives explicit human approval.
