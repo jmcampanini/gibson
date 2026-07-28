@@ -54,6 +54,15 @@ type responseResult struct {
 	err error
 }
 
+type commandError struct {
+	command string
+	message string
+}
+
+func (e *commandError) Error() string {
+	return fmt.Sprintf("pi RPC command %q failed: %s", e.command, e.message)
+}
+
 type responseEnvelope struct {
 	Command string          `json:"command"`
 	Success bool            `json:"success"`
@@ -159,9 +168,32 @@ func (c *rpcClient) command(ctx context.Context, command string, fields map[stri
 		if message == "" {
 			message = "pi returned an unsuccessful response"
 		}
-		return nil, fmt.Errorf("pi RPC command %q failed: %s", command, message)
+		return nil, &commandError{command: command, message: message}
 	}
 	return envelope.Data, nil
+}
+
+func (c *rpcClient) write(value any) error {
+	request := writeRequest{value: value, result: make(chan error, 1)}
+	select {
+	case c.writes <- request:
+	case <-c.closing:
+		return errRPCClosing
+	case <-c.writerDone:
+		return c.writerFailure()
+	}
+
+	select {
+	case err := <-request.result:
+		if err != nil {
+			return fmt.Errorf("write pi RPC record: %w", err)
+		}
+		return nil
+	case <-c.closing:
+		return errRPCClosing
+	case <-c.writerDone:
+		return c.writerFailure()
+	}
 }
 
 func (c *rpcClient) addPending(id string, response chan responseResult) error {
