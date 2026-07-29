@@ -1,10 +1,16 @@
 # MILESTONE_CONVENTIONS
 
-Binding conventions for the remaining milestone plans (`MILESTONE_1.md` … `MILESTONE_7.md`),
-including the seams established by the current implementation. SPEC.md is normative for
-behavior; this file pins every cross-milestone seam SPEC.md left open so
-independently written plans compose. Where this file and SPEC.md conflict, SPEC.md wins.
-Plans MUST use these names, paths, and shapes verbatim — no local variants.
+Binding conventions for the remaining milestone plans (`MILESTONE_1.md` …
+`MILESTONE_7.md`), including the seams established by the current implementation.
+[PROCESS.md](PROCESS.md) governs plan authority, activation, execution, consolidation, and
+retirement. SPEC.md is normative for behavior; this file pins every cross-milestone seam
+SPEC.md left open so independently written plans compose. Where this file and SPEC.md
+conflict, SPEC.md wins.
+
+An active milestone file owns its outcomes and acceptance boundary; its implementation
+notes are suggestive. Root `PLAN.md` owns the active implementation, chunks, and
+verification. Inactive milestone files are provisional until their plan-gate review.
+All plans MUST use the names, paths, and shapes here verbatim — no local variants.
 
 ## 1. Module, layout, CLI, libraries
 
@@ -352,6 +358,10 @@ confidence unavailable below, rather than duplicating lower-layer assertion matr
   (grove-cli idiom). No mocking frameworks; fakes and real subprocesses only.
 
 ## 10. Required remaining-milestone plan template
+
+Every numbered milestone plan MUST begin with one lifecycle status after its title:
+`active` for the current milestone or `provisional` for an inactive forecast. Activation
+requires the plan-gate review in PROCESS.md.
 
 Every remaining milestone plan MUST contain exactly these sections, in order:
 

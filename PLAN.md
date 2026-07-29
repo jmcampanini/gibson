@@ -1,12 +1,19 @@
 # M1 Execution Plan
 
-This is the human-readable execution companion to
-`~/Code/github.com/jmcampanini/gibson/main/plans/MILESTONE_1.md`. That milestone document
-remains authoritative for detailed behavior, interfaces, and rationale. This plan organizes
-its implementation into reviewable chunks without changing its scope.
+Under `~/Code/github.com/jmcampanini/gibson/main/plans/PROCESS.md`, the active
+`~/Code/github.com/jmcampanini/gibson/main/plans/MILESTONE_1.md` owns M1's outcomes and
+acceptance boundary. This root plan owns implementation, chunking, progress, and
+verification without changing that scope.
+
+PROCESS.md was adopted after Chunks 1–3 landed. Their approved boundaries are
+historic and remain unchanged; Chunks 4–8 also retain their approved definitions. The
+new chunk-design rules govern the remaining work prospectively and every future root
+plan. Known planning inconsistencies are recorded in
+`~/Code/github.com/jmcampanini/gibson/main/plans/DIVERGENCES.md` for M1 consolidation.
 
 ## How we will work
 
+- Follow the shared lifecycle in `plans/PROCESS.md`; the rules below are M1-specific.
 - Complete one chunk at a time, in order.
 - Create each chunk branch from `feature/m1` and target its PR back to `feature/m1`; do
   not stack a later chunk on an unmerged chunk branch.

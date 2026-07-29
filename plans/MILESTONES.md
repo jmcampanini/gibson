@@ -4,6 +4,10 @@ Vertical slices building to the full [SPEC.md](SPEC.md). Each milestone ends wit
 capability you can actually use, proven by an agent-verified workflow. Later milestones
 stack on earlier ones; nothing is built speculatively for a later slice.
 
+[PROCESS.md](PROCESS.md) governs activation, execution, consolidation, and retirement.
+M0 is complete, M1 is active, and M2–M7 are provisional forecasts until their plan-gate
+reviews.
+
 ## Principles behind this slicing
 
 1. **Risk-first, not UI-first.** Gibson's risk lives in its seams: Go↔pi RPC integration
@@ -29,6 +33,8 @@ stack on earlier ones; nothing is built speculatively for a later slice.
 
 ## M1 — Headless session core (pi over RPC, no HTTP)
 
+**Status: active.**
+
 **You can now:** run `gibson run <type> "<prompt>"` in a checkout — a one-shot pi run
 honoring your session-type config, with the session stored in `.gibson/sessions/`.
 
@@ -48,6 +54,8 @@ entry, that abort mid-stream terminates cleanly, and that `git status --porcelai
 empty after the `.gibson/` artifacts are created.
 
 ## M2 — Curl-drivable HTTP API
+
+**Status: provisional — requires plan-gate review before activation.**
 
 **You can now:** drive full sessions with `curl` — create, stream, prompt, abort — with
 multiple concurrent clients seeing identical streams.
@@ -69,6 +77,8 @@ and abort.
 
 ## M3 — Minimal browser chat
 
+**Status: provisional — requires plan-gate review before activation.**
+
 **You can now:** open the UI, start a session (type + checkout picker), chat with
 streaming responses, and abort — from any device the bind allows.
 
@@ -84,6 +94,8 @@ aborts a long turn, opens a second tab mid-stream and verifies identical state v
 
 ## M4 — Full conversation rendering
 
+**Status: provisional — requires plan-gate review before activation.**
+
 **You can now:** read real working sessions comfortably — tool calls as live collapsible
 cards, thinking collapsed by default, context meter, steer vs queued follow-up sends.
 
@@ -97,6 +109,8 @@ finalize correctly, verifies a mid-stream steer visibly redirects the agent, and
 a `custom_message` renders via the fallback card.
 
 ## M5 — Extension dialogs and surfaces
+
+**Status: provisional — requires plan-gate review before activation.**
 
 **You can now:** run session types whose extensions ask questions — approve/deny gates,
 selects, inputs — from the browser, on whichever device answers first.
@@ -118,6 +132,8 @@ blocked in the list.
 
 ## M6 — Session management and restart resilience
 
+**Status: provisional — requires plan-gate review before activation.**
+
 **You can now:** treat gibson as the durable home for all sessions in the workspace —
 browse them across checkouts, close and reopen them, restart the server without losing
 anything.
@@ -133,6 +149,8 @@ survives, sends a message to a pre-restart session and verifies it resumes with 
 intact, and verifies orphan cleanup on a simulated crash.
 
 ## M7 — v1 hardening and full acceptance
+
+**Status: provisional — requires plan-gate review before activation.**
 
 **You can now:** call it v1 — SPEC.md's acceptance workflow passes end-to-end.
 

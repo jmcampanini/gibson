@@ -1,5 +1,8 @@
 # MILESTONE_5 — Extension dialogs and surfaces
 
+Status: **provisional**. This forecast requires the plan-gate review in
+[PROCESS.md](PROCESS.md) before it becomes the active milestone contract.
+
 Conforms to [MILESTONE_CONVENTIONS.md](MILESTONE_CONVENTIONS.md) (all §-references to "conventions"
 mean that file; "SPEC" means [SPEC.md](SPEC.md)). Scope is exactly MILESTONES.md M5.
 

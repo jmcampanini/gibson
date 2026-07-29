@@ -1,5 +1,8 @@
 # MILESTONE_2 — Curl-drivable HTTP API
 
+Status: **provisional**. This forecast requires the plan-gate review in
+[PROCESS.md](PROCESS.md) before it becomes the active milestone contract.
+
 Implements MILESTONES.md M2 exactly. Governing documents: SPEC.md (normative behavior),
 MILESTONE_CONVENTIONS.md (binding, cited as CONV §n), pi's RPC reference at
 `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (cited as rpc.md),

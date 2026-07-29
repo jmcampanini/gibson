@@ -1,5 +1,9 @@
 # MILESTONE_1 — Headless session core (pi over RPC, no HTTP)
 
+Status: **active** under [PROCESS.md](PROCESS.md). This file owns M1's outcomes and
+acceptance boundary; root [PLAN.md](../PLAN.md) owns implementation, chunking, and
+verification.
+
 Implementation plan for MILESTONES.md M1. SPEC.md is normative for behavior;
 MILESTONE_CONVENTIONS.md is binding (cited as "conventions §N"). Pi protocol facts below are
 taken from the docs shipped with verified pi version 0.82.1

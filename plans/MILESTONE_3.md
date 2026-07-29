@@ -1,5 +1,8 @@
 # MILESTONE_3 — Minimal browser chat
 
+Status: **provisional**. This forecast requires the plan-gate review in
+[PROCESS.md](PROCESS.md) before it becomes the active milestone contract.
+
 Implements MILESTONES.md **M3** exactly. Normative behavior: [SPEC.md](SPEC.md).
 Binding seams: [MILESTONE_CONVENTIONS.md](MILESTONE_CONVENTIONS.md) (cited below as CONV §n).
 Rationale reference: [BACKGROUND.md](BACKGROUND.md). This plan adds no server code paths

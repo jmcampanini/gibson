@@ -1,5 +1,8 @@
 # MILESTONE_6 — Session management and restart resilience
 
+Status: **provisional**. This forecast requires the plan-gate review in
+[PROCESS.md](PROCESS.md) before it becomes the active milestone contract.
+
 Conforms to MILESTONE_CONVENTIONS.md (binding). SPEC.md is normative; section references
 below are to SPEC unless prefixed `CONV` (MILESTONE_CONVENTIONS.md) or `MS` (MILESTONES.md).
 
