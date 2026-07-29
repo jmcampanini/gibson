@@ -141,7 +141,7 @@ Chunks 1–2.
 
 ### Mandatory approval gate
 
-- [ ] Present Chunk 3's behavior and verification evidence, then receive explicit approval
+- [x] Present Chunk 3's behavior and verification evidence, then receive explicit approval
   before beginning Chunk 4.
 
 ## Chunk 4 — First human-drivable run
