@@ -362,10 +362,7 @@ func (f *runFinisher) finish(outcome RunOutcome, runErr error) (RunOutcome, erro
 	if closeErr == nil {
 		if err := f.storage.SetStatus(f.sessionID, store.StatusStopped); err != nil {
 			registryErr = fmt.Errorf("record stopped session: %w", err)
-		}
-	}
-	if closeErr == nil && registryErr == nil {
-		if _, err := fmt.Fprintf(f.stderr, "[session] id=%s status=stopped file=%s log=%s\n", f.sessionID, f.sessionFile, f.logPath); err != nil {
+		} else if _, err := fmt.Fprintf(f.stderr, "[session] id=%s status=stopped file=%s log=%s\n", f.sessionID, f.sessionFile, f.logPath); err != nil {
 			registryErr = fmt.Errorf("write final session details: %w", err)
 		}
 	}

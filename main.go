@@ -29,9 +29,7 @@ func main() {
 
 func processExitCode(outcome app.RunOutcome, err error, stderr io.Writer) int {
 	if err != nil {
-		if _, writeErr := fmt.Fprintf(stderr, "gibson: error: %v\n", err); writeErr != nil {
-			return 1
-		}
+		_, _ = fmt.Fprintf(stderr, "gibson: error: %v\n", err)
 		return 1
 	}
 	if outcome == app.RunInterrupted {
