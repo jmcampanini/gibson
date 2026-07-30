@@ -137,6 +137,36 @@ func TestRunPresenterKeepsAssistantTextSeparateFromDiagnostics(t *testing.T) {
 	assert.Contains(t, stderr.String(), "extension review.ts: failed")
 }
 
+func TestRunPresentsDialogWarningWhilePromptAcceptanceIsPending(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	releasePrompt := make(chan struct{})
+	stderr := &dialogReleaseWriter{release: releasePrompt}
+	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+		events := make(chan pisession.Event, 1)
+		session := newScriptedRunSession(cfg, events)
+		session.prompt = func(ctx context.Context, _, _ string) error {
+			events <- runEvent("extension_ui_request", `{"type":"extension_ui_request","method":"confirm","message":"Continue?"}`)
+			select {
+			case <-releasePrompt:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return session, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	outcome, err := run(ctx, RunOptions{Type: "quick", Message: "/dialog", Stderr: stderr}, log.New(&bytes.Buffer{}), dependencies)
+
+	require.NoError(t, err)
+	assert.Equal(t, RunCompleted, outcome)
+	assert.Contains(t, stderr.String(), "[warning] pi is waiting for a confirm dialog; gibson run cannot answer dialogs")
+}
+
 func TestRunFinishesPromptHandledWithoutAgentRun(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
@@ -313,16 +343,20 @@ type scriptedRunSession struct {
 	prompted  chan struct{}
 	closed    chan bool
 	onPrompt  func()
+	prompt    func(context.Context, string, string) error
 	getState  func() (json.RawMessage, error)
 	closeOnce sync.Once
 }
 
-func (s *scriptedRunSession) Prompt(context.Context, string, string) error {
+func (s *scriptedRunSession) Prompt(ctx context.Context, message, image string) error {
 	if s.prompted != nil {
 		close(s.prompted)
 	}
 	if s.onPrompt != nil {
 		s.onPrompt()
+	}
+	if s.prompt != nil {
+		return s.prompt(ctx, message, image)
 	}
 	return nil
 }
@@ -360,6 +394,20 @@ func newScriptedRunSession(cfg pisession.Config, events chan pisession.Event) *s
 			filepath.Join(cfg.SessionDir, "opaque.jsonl"),
 		)),
 	}
+}
+
+type dialogReleaseWriter struct {
+	bytes.Buffer
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *dialogReleaseWriter) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	if bytes.Contains(w.Bytes(), []byte("cannot answer dialogs")) {
+		w.once.Do(func() { close(w.release) })
+	}
+	return n, err
 }
 
 type runRegistryFile struct {

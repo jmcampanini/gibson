@@ -175,14 +175,6 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		return finishRun(RunCompleted, fmt.Errorf("write session details: %w", err), session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
 	}
 
-	if err := session.Prompt(ctx, options.Message, ""); err != nil {
-		outcome, runErr := classifyRunError(ctx, fmt.Errorf("prompt pi: %w", err))
-		return finishRun(outcome, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
-	}
-	if err := storage.Touch(sessionID, dependencies.now().UTC()); err != nil {
-		return finishRun(RunCompleted, fmt.Errorf("record accepted prompt: %w", err), session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
-	}
-
 	presenter := runPresenter{stdout: stdout, stderr: stderr}
 	events := session.Events()
 	processEvent := func(event pisession.Event) (bool, error) {
@@ -207,6 +199,52 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		return false, nil
 	}
 
+	promptResults := make(chan error, 1)
+	go func() {
+		promptResults <- session.Prompt(ctx, options.Message, "")
+	}()
+
+	agentStarted := false
+	settledBeforeAcceptance := false
+promptWait:
+	for {
+		select {
+		case <-ctx.Done():
+			if err := presenter.finishText(); err != nil {
+				return finishRun(RunCompleted, err, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+			}
+			return finishRun(RunInterrupted, nil, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+		case event, open := <-events:
+			if !open {
+				return finishExitedRun(session, presenter.finishText(), storage, registered, stderr, sessionID, state.SessionFile, logPath)
+			}
+			settled, eventErr := processEvent(event)
+			if eventErr != nil {
+				runErr := errors.Join(eventErr, presenter.finishText())
+				return finishRun(RunCompleted, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+			}
+			if event.Type == "agent_start" {
+				agentStarted = true
+			}
+			settledBeforeAcceptance = settledBeforeAcceptance || settled
+		case promptErr := <-promptResults:
+			if promptErr != nil {
+				outcome, runErr := classifyRunError(ctx, fmt.Errorf("prompt pi: %w", promptErr))
+				runErr = errors.Join(runErr, presenter.finishText())
+				return finishRun(outcome, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+			}
+			if err := storage.Touch(sessionID, dependencies.now().UTC()); err != nil {
+				runErr := errors.Join(fmt.Errorf("record accepted prompt: %w", err), presenter.finishText())
+				return finishRun(RunCompleted, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+			}
+			break promptWait
+		}
+	}
+	if settledBeforeAcceptance {
+		runErr := errors.Join(presenter.finalAssistantErr, presenter.finishText())
+		return finishRun(RunCompleted, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+	}
+
 	type stateResult struct {
 		raw json.RawMessage
 		err error
@@ -218,7 +256,6 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		stateResults <- stateResult{raw: raw, err: err}
 	}()
 
-	agentStarted := false
 	idleConfirmed := false
 	for {
 		if idleConfirmed {
