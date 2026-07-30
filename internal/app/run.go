@@ -135,7 +135,6 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		return classifyRunError(ctx, err)
 	}
 
-	registered := false
 	startedAt := dependencies.now().UTC()
 	if err := storage.Put(store.Record{
 		ID:             sessionID,
@@ -148,31 +147,38 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		closeErr := closeRunSession(session)
 		return RunCompleted, errors.Join(fmt.Errorf("record live session: %w", err), closeErr)
 	}
-	registered = true
+	finisher := runFinisher{
+		session:   session,
+		storage:   storage,
+		stderr:    stderr,
+		sessionID: sessionID,
+		logPath:   logPath,
+	}
 
 	stateRaw, err := session.GetState(ctx)
 	if err != nil {
 		outcome, runErr := classifyRunError(ctx, fmt.Errorf("read pi session state: %w", err))
-		return finishRun(outcome, runErr, session, storage, registered, stderr, sessionID, "", logPath)
+		return finisher.finish(outcome, runErr)
 	}
 	var state struct {
 		SessionID   string `json:"sessionId"`
 		SessionFile string `json:"sessionFile"`
 	}
 	if err := json.Unmarshal(stateRaw, &state); err != nil {
-		return finishRun(RunCompleted, fmt.Errorf("decode pi session state: %w", err), session, storage, registered, stderr, sessionID, "", logPath)
+		return finisher.finish(RunCompleted, fmt.Errorf("decode pi session state: %w", err))
 	}
+	finisher.sessionFile = state.SessionFile
 	if state.SessionID != sessionID {
-		return finishRun(RunCompleted, fmt.Errorf("pi reported session id %q, expected %q", state.SessionID, sessionID), session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+		return finisher.finish(RunCompleted, fmt.Errorf("pi reported session id %q, expected %q", state.SessionID, sessionID))
 	}
 	if state.SessionFile == "" {
-		return finishRun(RunCompleted, errors.New("pi reported an empty session file path"), session, storage, registered, stderr, sessionID, "", logPath)
+		return finisher.finish(RunCompleted, errors.New("pi reported an empty session file path"))
 	}
 	if filepath.Clean(filepath.Dir(state.SessionFile)) != filepath.Clean(storage.SessionsDir()) {
-		return finishRun(RunCompleted, fmt.Errorf("pi reported session file outside Gibson's session directory: %s", state.SessionFile), session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+		return finisher.finish(RunCompleted, fmt.Errorf("pi reported session file outside Gibson's session directory: %s", state.SessionFile))
 	}
 	if _, err := fmt.Fprintf(stderr, "[session] id=%s file=%s log=%s\n", sessionID, state.SessionFile, logPath); err != nil {
-		return finishRun(RunCompleted, fmt.Errorf("write session details: %w", err), session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+		return finisher.finish(RunCompleted, fmt.Errorf("write session details: %w", err))
 	}
 
 	presenter := runPresenter{stdout: stdout, stderr: stderr}
@@ -211,17 +217,17 @@ promptWait:
 		select {
 		case <-ctx.Done():
 			if err := presenter.finishText(); err != nil {
-				return finishRun(RunCompleted, err, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finish(RunCompleted, err)
 			}
-			return finishRun(RunInterrupted, nil, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+			return finisher.finish(RunInterrupted, nil)
 		case event, open := <-events:
 			if !open {
-				return finishExitedRun(session, presenter.finishText(), storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finishExited(presenter.finishText())
 			}
 			settled, eventErr := processEvent(event)
 			if eventErr != nil {
 				runErr := errors.Join(eventErr, presenter.finishText())
-				return finishRun(RunCompleted, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finish(RunCompleted, runErr)
 			}
 			if event.Type == "agent_start" {
 				agentStarted = true
@@ -231,18 +237,18 @@ promptWait:
 			if promptErr != nil {
 				outcome, runErr := classifyRunError(ctx, fmt.Errorf("prompt pi: %w", promptErr))
 				runErr = errors.Join(runErr, presenter.finishText())
-				return finishRun(outcome, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finish(outcome, runErr)
 			}
 			if err := storage.Touch(sessionID, dependencies.now().UTC()); err != nil {
 				runErr := errors.Join(fmt.Errorf("record accepted prompt: %w", err), presenter.finishText())
-				return finishRun(RunCompleted, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finish(RunCompleted, runErr)
 			}
 			break promptWait
 		}
 	}
 	if settledBeforeAcceptance {
 		runErr := errors.Join(presenter.finalAssistantErr, presenter.finishText())
-		return finishRun(RunCompleted, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+		return finisher.finish(RunCompleted, runErr)
 	}
 
 	type stateResult struct {
@@ -262,11 +268,11 @@ promptWait:
 			select {
 			case event, open := <-events:
 				if !open {
-					return finishExitedRun(session, presenter.finishText(), storage, registered, stderr, sessionID, state.SessionFile, logPath)
+					return finisher.finishExited(presenter.finishText())
 				}
 				settled, eventErr := finishAfterEvent(event)
 				if eventErr != nil || settled {
-					return finishRun(RunCompleted, eventErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+					return finisher.finish(RunCompleted, eventErr)
 				}
 				if event.Type == "agent_start" {
 					agentStarted = true
@@ -275,25 +281,25 @@ promptWait:
 			default:
 				if agentStarted {
 					runErr := errors.Join(errors.New("pi became idle before agent_settled"), presenter.finishText())
-					return finishRun(RunCompleted, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+					return finisher.finish(RunCompleted, runErr)
 				}
-				return finishRun(RunCompleted, presenter.finishText(), session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finish(RunCompleted, presenter.finishText())
 			}
 		}
 
 		select {
 		case <-ctx.Done():
 			if err := presenter.finishText(); err != nil {
-				return finishRun(RunCompleted, err, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finish(RunCompleted, err)
 			}
-			return finishRun(RunInterrupted, nil, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+			return finisher.finish(RunInterrupted, nil)
 		case event, open := <-events:
 			if !open {
-				return finishExitedRun(session, presenter.finishText(), storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finishExited(presenter.finishText())
 			}
 			settled, eventErr := finishAfterEvent(event)
 			if eventErr != nil || settled {
-				return finishRun(RunCompleted, eventErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finish(RunCompleted, eventErr)
 			}
 			if event.Type == "agent_start" {
 				agentStarted = true
@@ -303,25 +309,34 @@ promptWait:
 			if result.err != nil {
 				outcome, runErr := classifyRunError(ctx, fmt.Errorf("check pi state after prompt acceptance: %w", result.err))
 				runErr = errors.Join(runErr, presenter.finishText())
-				return finishRun(outcome, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finish(outcome, runErr)
 			}
 			streaming, stateErr := runSessionStreaming(result.raw)
 			if stateErr != nil {
 				runErr := errors.Join(stateErr, presenter.finishText())
-				return finishRun(RunCompleted, runErr, session, storage, registered, stderr, sessionID, state.SessionFile, logPath)
+				return finisher.finish(RunCompleted, runErr)
 			}
 			idleConfirmed = !streaming
 		}
 	}
 }
 
-func finishExitedRun(session runSession, textErr error, storage *store.Store, registered bool, stderr io.Writer, sessionID, sessionFile, logPath string) (RunOutcome, error) {
-	exitErr := session.ExitErr()
+type runFinisher struct {
+	session     runSession
+	storage     *store.Store
+	stderr      io.Writer
+	sessionID   string
+	sessionFile string
+	logPath     string
+}
+
+func (f *runFinisher) finishExited(textErr error) (RunOutcome, error) {
+	exitErr := f.session.ExitErr()
 	if exitErr == nil {
 		exitErr = errors.New("event stream closed")
 	}
 	runErr := errors.Join(fmt.Errorf("pi exited before agent settled: %w", exitErr), textErr)
-	return finishRun(RunCompleted, runErr, session, storage, registered, stderr, sessionID, sessionFile, logPath)
+	return f.finish(RunCompleted, runErr)
 }
 
 func runSessionStreaming(stateRaw json.RawMessage) (bool, error) {
@@ -341,16 +356,16 @@ func classifyRunError(ctx context.Context, err error) (RunOutcome, error) {
 	return RunCompleted, err
 }
 
-func finishRun(outcome RunOutcome, runErr error, session runSession, storage *store.Store, registered bool, stderr io.Writer, sessionID, sessionFile, logPath string) (RunOutcome, error) {
-	closeErr := closeRunSession(session)
+func (f *runFinisher) finish(outcome RunOutcome, runErr error) (RunOutcome, error) {
+	closeErr := closeRunSession(f.session)
 	var registryErr error
-	if registered && closeErr == nil {
-		if err := storage.SetStatus(sessionID, store.StatusStopped); err != nil {
+	if closeErr == nil {
+		if err := f.storage.SetStatus(f.sessionID, store.StatusStopped); err != nil {
 			registryErr = fmt.Errorf("record stopped session: %w", err)
 		}
 	}
 	if closeErr == nil && registryErr == nil {
-		if _, err := fmt.Fprintf(stderr, "[session] id=%s status=stopped file=%s log=%s\n", sessionID, sessionFile, logPath); err != nil {
+		if _, err := fmt.Fprintf(f.stderr, "[session] id=%s status=stopped file=%s log=%s\n", f.sessionID, f.sessionFile, f.logPath); err != nil {
 			registryErr = fmt.Errorf("write final session details: %w", err)
 		}
 	}
