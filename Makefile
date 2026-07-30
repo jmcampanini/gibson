@@ -38,15 +38,26 @@ test: ## Run tests with the race detector.
 cli-proof: ## Build and verify the compiled CLI contract.
 	@$(MAKE) --no-print-directory build VERSION=cli-proof
 	@set -eu; \
-	test -x "$(BINARY)"; \
-	root_help="$$($(BINARY) --help)"; \
+	repo_root="$$PWD"; \
+	gibson="$$repo_root/$(BINARY)"; \
+	sandbox="$$repo_root/.sandbox/cli-proof-$$$$"; \
+	trap 'rm -rf "$$sandbox"' EXIT; \
+	test -x "$$gibson"; \
+	root_help="$$($$gibson --help)"; \
 	printf '%s\n' "$$root_help" | grep -Eq '^[[:space:]]+serve[[:space:]]'; \
-	version="$$($(BINARY) --version)"; \
+	printf '%s\n' "$$root_help" | grep -Eq '^[[:space:]]+run[[:space:]]'; \
+	version="$$($$gibson --version)"; \
 	test "$$version" = "gibson version cli-proof"; \
-	serve_help="$$($(BINARY) serve --help)"; \
+	serve_help="$$($$gibson serve --help)"; \
 	printf '%s\n' "$$serve_help" | grep -Fq -- '--port'; \
 	printf '%s\n' "$$serve_help" | grep -Fq -- '--dev'; \
-	if error_output="$$($(BINARY) serve unexpected 2>&1)"; then \
+	run_help="$$($$gibson run --help)"; \
+	printf '%s\n' "$$run_help" | grep -Fq -- 'run <type> <message>'; \
+	if printf '%s\n' "$$run_help" | grep -Fq -- '--checkout'; then \
+		echo "run exposed --checkout before Chunk 6" >&2; \
+		exit 1; \
+	fi; \
+	if error_output="$$($$gibson serve unexpected 2>&1)"; then \
 		echo "expected positional arguments to fail" >&2; \
 		exit 1; \
 	else \
@@ -55,6 +66,33 @@ cli-proof: ## Build and verify the compiled CLI contract.
 	test "$$error_rc" -eq 1; \
 	test "$$(printf '%s\n' "$$error_output" | wc -l | tr -d ' ')" -eq 1; \
 	case "$$error_output" in 'gibson: error: '*) ;; *) echo "missing process error prefix" >&2; exit 1;; esac; \
+	mkdir -p "$$sandbox/main"; \
+	go build -o "$$sandbox/pi" ./internal/fakepi; \
+	git -C "$$sandbox/main" init -b main -q; \
+	printf '[server]\nport = 7311\npi_bin = "%s"\n\n[sessions.quick]\ndescription = "CLI proof"\n' "$$sandbox/pi" > "$$sandbox/main/gibson.toml"; \
+	printf '.gibson/\n' > "$$sandbox/main/.gitignore"; \
+	git -C "$$sandbox/main" add gibson.toml .gitignore; \
+	git -C "$$sandbox/main" -c user.name='Gibson CLI Proof' -c user.email=gibson@example.invalid commit -qm init; \
+	cd "$$sandbox/main"; \
+	run_stdout="$$($$gibson run quick 'Say hello' 2>"$$sandbox/run.stderr")"; \
+	test "$$run_stdout" = 'Hello from fake pi.'; \
+	grep -Fq '[session] id=' "$$sandbox/run.stderr"; \
+	grep -Fq 'status=stopped' "$$sandbox/run.stderr"; \
+	test "$$(find .gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')" -eq 1; \
+	test "$$(find .gibson/logs -type f -name '*.stderr.log' | wc -l | tr -d ' ')" -eq 1; \
+	grep -Fq '"version": 1' .gibson/state.json; \
+	grep -Fq '"status": "stopped"' .gibson/state.json; \
+	grep -Fq '"pid": 0' .gibson/state.json; \
+	test -z "$$(git status --porcelain)"; \
+	if unknown_output="$$($$gibson run missing hi 2>&1)"; then \
+		echo "expected unknown session type to fail" >&2; \
+		exit 1; \
+	else \
+		unknown_rc=$$?; \
+	fi; \
+	test "$$unknown_rc" -eq 1; \
+	test "$$(printf '%s\n' "$$unknown_output" | wc -l | tr -d ' ')" -eq 1; \
+	case "$$unknown_output" in 'gibson: error: '*'configured types: quick'*) ;; *) echo "unknown type error did not list configured types" >&2; exit 1;; esac; \
 	printf '%s\n' 'GIBSON_CLI_PROOF=PASS'
 
 lint: ## Run golangci-lint.
