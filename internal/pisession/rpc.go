@@ -110,9 +110,12 @@ func (c *rpcClient) command(ctx context.Context, command string, fields map[stri
 	}
 	defer c.removePending(id, response)
 
-	timer := time.NewTimer(c.commandTimeout)
-	defer timer.Stop()
-	timeout := timer.C
+	var timeout <-chan time.Time
+	if command != "prompt" {
+		timer := time.NewTimer(c.commandTimeout)
+		defer timer.Stop()
+		timeout = timer.C
+	}
 	timeoutErr := fmt.Errorf("%w: command %q (%s)", ErrCommandTimeout, command, id)
 
 	request := writeRequest{value: payload, result: make(chan error, 1)}
