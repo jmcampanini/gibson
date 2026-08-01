@@ -42,7 +42,7 @@ its implementation and verification work as unchecked task-list items. Those ite
 
 - its implementation boundary and dependencies;
 - the primary test owner for each behavior and the cheapest faithful verification;
-- a human proof for any new interaction; and
+- a human proof for any new interaction, including the exact commands it runs; and
 - the agent verification required before review.
 
 Update these checkboxes as work is completed. Check a chunk in the progress list only
@@ -54,6 +54,24 @@ A human proof demonstrates the built product from its real interaction surface; 
 not replace automated tests, `make check`, code review, or the final milestone acceptance
 workflow. Chunk boundaries should optimize for coherent human review without withholding
 working behavior merely to keep architectural layers separate.
+
+## Chunk demos
+
+A chunk's human proof is delivered as a chunk demo: a single-file HTML slide presentation
+at `.sandbox/demos/<milestone>-chunk-<n>.html`. To produce it, the agent builds the real
+product, runs the proof's recorded commands in a fresh scratch environment, and pastes
+each command with its verbatim terminal output into the slides. Slide content is captured
+output only — never retyped, abridged, or invented. When a proof step is exercised in the
+browser rather than the terminal, the slide embeds a real screenshot captured during the
+run. The deck opens with a title slide naming the chunk, then shows roughly one command
+and its output per slide with a short caption naming what it proves. The file is fully
+self-contained — inline CSS and JavaScript, no external assets — and navigates with the
+arrow keys.
+
+Demos are never committed: `.sandbox/` is disposable, and any agent on the chunk branch
+can regenerate the deck from the command list recorded in root `PLAN.md`. Javier accepts
+the chunk's human proof by watching the demo and may rerun any command by hand.
+Review-only chunks produce no demo.
 
 ## Milestone workflow
 
@@ -71,11 +89,12 @@ working behavior merely to keep architectural layers separate.
 3. **Deliver each chunk in sequence.** For each planned chunk:
    1. branch from the current milestone-branch tip;
    2. implement the chunk and its cheapest faithful verification;
-   3. build the real product and run the chunk's human proof when it has one;
+   3. build the real product and, when the chunk has a human proof, capture it as the
+      chunk demo;
    4. run `make check` locally;
    5. open a pull request targeting the milestone branch and require green CI;
-   6. have Javier code-review it, codify any lasting review guardrail, and squash-merge
-      it; then
+   6. have Javier watch the chunk demo when one exists and code-review the pull request,
+      codify any lasting review guardrail, and squash-merge it; then
    7. start the next chunk from the resulting milestone-branch tip.
 4. **Review the complete milestone end to end.** After every chunk is merged, run the real
    built binary through root `PLAN.md`'s documented workflow and retain a clean transcript.
@@ -122,8 +141,9 @@ Consolidation turns an execution branch into an authoritative product baseline:
 
 A milestone exits only when all of these gates, plus its own specific exit criteria, hold:
 
-- [ ] Every planned chunk was reviewed, passed local `make check` and CI, and was
-      squash-merged into the milestone branch in sequence.
+- [ ] Every planned chunk was reviewed, had its chunk demo watched when it had one,
+      passed local `make check` and CI, and was squash-merged into the milestone branch
+      in sequence.
 - [ ] Durable automated coverage of root `PLAN.md`'s end-to-end boundaries passes inside
       `make check`.
 - [ ] An agent drove the real built binary through root `PLAN.md`'s documented end-to-end
