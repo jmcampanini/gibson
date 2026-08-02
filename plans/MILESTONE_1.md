@@ -213,11 +213,17 @@ with `ErrProcessExited`, zeroes/clears the pending map, closes the stderr log fi
 `done`, and finally closes the events channel. Consumers therefore see `range Events()`
 end and can then read a fully-populated `ExitErr()`.
 
+A lightweight process tracker snapshots pi descendants while pi is live and retains
+PID/PGID/start-time identities after reparenting. Before signaling a retained identity,
+shutdown requires the current process to match its tracked PGID and start time, limiting
+PID-reuse risk. The reaper kills matched tracked groups/processes on every exit path
+before publishing completion.
+
 - `Close(ctx)`: mark closing (unsticks pump sends), signal pi's dedicated process group
-  with SIGTERM, and wait up to 5s. Forced escalation freezes pi, snapshots descendants,
-  SIGKILLs owned descendant groups/processes and pi's group, then reaps. This covers pi's
-  detached tool process groups when pi cannot run its own SIGTERM cleanup handler.
-  Graceful pi exit under SIGTERM is status 143 (SPEC §5.2.2). Idempotent.
+  with SIGTERM, and wait up to 5s. Forced escalation freezes pi, takes a final descendant
+  snapshot, SIGKILLs owned descendant groups/processes and pi's group, then reaps. This
+  covers pi's detached tool process groups when pi cannot run its own SIGTERM cleanup
+  handler. Graceful pi exit under SIGTERM is status 143 (SPEC §5.2.2). Idempotent.
 - `Abort(ctx)`: sends the `abort` command; pi replies `success:true` and the aborted
   assistant message carries `stopReason:"aborted"` (SPEC §6.2, rpc.md). Abort does NOT
   terminate the process — the caller keeps consuming events until `agent_settled`.

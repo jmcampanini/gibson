@@ -356,10 +356,10 @@ func TestSessionForcedCloseKillsDetachedDescendants(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
-func TestSessionReapsWhenDetachedDescendantHoldsStdout(t *testing.T) {
+func TestSessionUnexpectedExitKillsDetachedDescendants(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "stdout-holder.pid")
 	script := fmt.Sprintf(
-		`GIBSON_TEST_DETACHED_HELPER=1 GIBSON_TEST_DETACHED_PID_FILE=%q %q -test.run '^TestSessionDetachedProcessHelper$' & while [ ! -s %q ]; do sleep 0.01; done; printf '{"type":"final"}\n'; exit 7`,
+		`GIBSON_TEST_DETACHED_HELPER=1 GIBSON_TEST_DETACHED_PID_FILE=%q %q -test.run '^TestSessionDetachedProcessHelper$' & while [ ! -s %q ]; do sleep 0.01; done; sleep 0.1; printf '{"type":"final"}\n'; exit 7`,
 		pidFile,
 		os.Args[0],
 		pidFile,
@@ -367,14 +367,29 @@ func TestSessionReapsWhenDetachedDescendantHoldsStdout(t *testing.T) {
 	session := startLifecycleProcess(t, script)
 	assert.Equal(t, "final", receiveSessionEvent(t, session.Events()).Type)
 	detachedPID := readProcessID(t, pidFile)
-	t.Cleanup(func() {
-		_ = signalProcessGroup(detachedPID, syscall.SIGKILL)
-	})
 
 	select {
 	case <-session.Done():
 	case <-time.After(2 * time.Second):
 		t.Fatal("session did not reap after parent exit")
+	}
+	for range session.Events() {
+	}
+	require.Error(t, session.ExitErr())
+	require.Eventually(t, func() bool {
+		return !processExists(detachedPID)
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestSessionReapsWhenStdoutDescriptorRemainsOpen(t *testing.T) {
+	session, heldStdout := startLifecycleProcessHoldingStdout(t, `printf '{"type":"final"}\n'; exit 7`)
+	t.Cleanup(func() { _ = heldStdout.Close() })
+
+	assert.Equal(t, "final", receiveSessionEvent(t, session.Events()).Type)
+	select {
+	case <-session.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not reap with an open stdout descriptor")
 	}
 	for range session.Events() {
 	}
@@ -439,6 +454,13 @@ func TestSpawnCleansUpAfterReadinessFailure(t *testing.T) {
 
 func startLifecycleProcess(t testing.TB, script string) *Session {
 	t.Helper()
+	session, childStdout := startLifecycleProcessHoldingStdout(t, script)
+	require.NoError(t, childStdout.Close())
+	return session
+}
+
+func startLifecycleProcessHoldingStdout(t testing.TB, script string) (*Session, *os.File) {
+	t.Helper()
 	cmd := exec.Command("sh", "-c", script)
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
@@ -450,9 +472,9 @@ func startLifecycleProcess(t testing.TB, script string) *Session {
 	require.NoError(t, err)
 	cmd.Stderr = stderr
 	require.NoError(t, cmd.Start())
-	require.NoError(t, childStdout.Close())
 
 	logger := log.New(bytes.NewBuffer(nil))
+	processes := newOwnedProcessTracker(cmd.Process.Pid)
 	session := &Session{
 		id:               "lifecycle-test",
 		pid:              cmd.Process.Pid,
@@ -461,19 +483,21 @@ func startLifecycleProcess(t testing.TB, script string) *Session {
 		stdout:           stdout,
 		stderr:           stderr,
 		logger:           logger,
+		processes:        processes,
 		done:             make(chan struct{}),
 		complete:         make(chan struct{}),
 		shutdownDone:     make(chan struct{}),
 		shutdownEscalate: make(chan struct{}),
 		shutdownGrace:    200 * time.Millisecond,
 	}
+	go processes.run()
 	go session.reap()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		_ = session.Close(ctx)
 	})
-	return session
+	return session, childStdout
 }
 
 func readProcessID(t testing.TB, path string) int {

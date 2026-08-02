@@ -233,8 +233,9 @@ pi exit, and repeated cleanup without expanding it into a sustained conversation
 - [x] Fail pending commands consistently when pi exits or a command times out.
 - [x] Isolate pi from Gibson's terminal process group so Ctrl+C reaches Gibson without
   preempting the durable RPC abort.
-- [x] Make close idempotent and escalate from SIGTERM to full owned-process-tree SIGKILL
-  only after the graceful timeout.
+- [x] Track pi descendants while pi is live, clean tracked ownership on unexpected exit,
+  and make close idempotent with full owned-process-tree SIGKILL only after the graceful
+  timeout.
 - [x] Reap pi independently of stdout EOF, bound the final stdout drain, and guarantee
   shutdown can unblock inherited descriptors or a full event channel while preserving
   deterministic completion and channel-close ordering.
@@ -264,9 +265,9 @@ Chunks 1–4, including the complete one-shot application workflow and storage l
 - [x] A second interrupt kills pi and its active tool descendants promptly, exits 130,
   clears the PID, and leaves no orphan; cleanup failures remain visible without
   reclassifying the interrupt as exit 1.
-- [x] A crash exits 1, fails pending work, records final exit information, bounds stdout
-  drain even when a descendant retains the descriptor, closes event delivery last,
-  preserves a useful stderr tail, and leaves stopped registry state.
+- [x] A crash exits 1, kills tracked detached descendants, fails pending work, records
+  final exit information, bounds stdout drain when a descriptor remains open, closes
+  event delivery last, preserves a useful stderr tail, and leaves stopped registry state.
 - [x] Repeated close calls neither leak, double-reap, nor corrupt completion state.
 - [x] Slow, crashed, and interrupted runs keep stdout and stderr within their contracts.
 - [x] `make check` passes, including repeated, shuffled, and race-enabled lifecycle tests.
