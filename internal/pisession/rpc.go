@@ -336,17 +336,13 @@ func (c *rpcClient) setWriterFailure(err error) {
 	}
 }
 
-func (c *rpcClient) writerFailure() error {
+func (c *rpcClient) transportFailure() error {
 	c.writerErrMu.Lock()
 	defer c.writerErrMu.Unlock()
 	if c.writerErr == nil {
 		return errRPCWriterStopped
 	}
 	return c.writerErr
-}
-
-func (c *rpcClient) transportFailure() error {
-	return c.writerFailure()
 }
 
 func (c *rpcClient) runPump() {
