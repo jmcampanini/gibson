@@ -507,6 +507,7 @@ func (p *fakePi) acceptPrompt(id json.RawMessage, command string, fields map[str
 	}
 	run := &scenarioRun{abort: make(chan struct{}), done: make(chan struct{}), user: userMessage}
 	p.activeRun = run
+	p.isStreaming = true
 	p.mu.Unlock()
 
 	if err := p.writeResponse(p.success(id, command, nil)); err != nil {
@@ -544,6 +545,7 @@ func (p *fakePi) finishRun(run *scenarioRun) {
 	p.mu.Lock()
 	if p.activeRun == run {
 		p.activeRun = nil
+		p.isStreaming = false
 	}
 	select {
 	case <-run.done:

@@ -837,6 +837,90 @@ func TestRunSecondInterruptForcesShutdown(t *testing.T) {
 	}
 }
 
+func TestRunCancellationKeepsInterruptedOutcomeWhenStdoutFinishFails(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	events := make(chan pisession.Event, 2)
+	stateChecked := make(chan struct{})
+	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+		session := newScriptedRunSession(cfg, events)
+		session.state = bytes.Replace(session.state, []byte("false"), []byte("true"), 1)
+		stateCalls := 0
+		session.getState = func() (json.RawMessage, error) {
+			stateCalls++
+			if stateCalls == 2 {
+				close(stateChecked)
+			}
+			return session.state, nil
+		}
+		return session, nil
+	}
+	stdoutErr := errors.New("stdout unavailable")
+	stdout := newFinishErrorWriter(stdoutErr)
+	ctx, cancel := context.WithCancel(context.Background())
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(ctx, RunOptions{Type: "quick", Message: "wait", Stdout: stdout}, log.New(&bytes.Buffer{}), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
+
+	waitRunSignal(t, stateChecked, "post-prompt state")
+	events <- runEvent("agent_start", `{"type":"agent_start"}`)
+	events <- runEvent("message_update", `{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"partial"}}`)
+	waitRunSignal(t, stdout.observed, "assistant output")
+	cancel()
+
+	select {
+	case got := <-finished:
+		require.ErrorIs(t, got.err, stdoutErr)
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not finish after cancellation")
+	}
+}
+
+func TestRunBufferedInterruptWinsSelectedEventClosure(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	interrupts := make(chan os.Signal, 1)
+	dependencies.interrupts = interrupts
+	events := make(chan pisession.Event, 2)
+	events <- runEvent("agent_start", `{"type":"agent_start"}`)
+	events <- runEvent("message_update", `{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"partial"}}`)
+	close(events)
+	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+		return newScriptedRunSession(cfg, events), nil
+	}
+	stdout := newBlockingFinishWriter()
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "wait", Stdout: stdout}, log.New(&bytes.Buffer{}), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
+
+	waitRunSignal(t, stdout.finishing, "event-stream final newline")
+	interrupts <- os.Interrupt
+	close(stdout.release)
+
+	select {
+	case got := <-finished:
+		require.ErrorContains(t, got.err, "event stream closed")
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not finish after event stream closed")
+	}
+}
+
 func TestRunAttemptsRegistryCleanupWhenCloseFails(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
@@ -1005,6 +1089,47 @@ func (w *observedBuffer) String() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.buffer.String()
+}
+
+type finishErrorWriter struct {
+	buffer   bytes.Buffer
+	err      error
+	observed chan struct{}
+	once     sync.Once
+}
+
+func newFinishErrorWriter(err error) *finishErrorWriter {
+	return &finishErrorWriter{err: err, observed: make(chan struct{})}
+}
+
+func (w *finishErrorWriter) Write(value []byte) (int, error) {
+	if bytes.Equal(value, []byte{'\n'}) {
+		return 0, w.err
+	}
+	written, err := w.buffer.Write(value)
+	if written > 0 {
+		w.once.Do(func() { close(w.observed) })
+	}
+	return written, err
+}
+
+type blockingFinishWriter struct {
+	buffer    bytes.Buffer
+	finishing chan struct{}
+	release   chan struct{}
+	once      sync.Once
+}
+
+func newBlockingFinishWriter() *blockingFinishWriter {
+	return &blockingFinishWriter{finishing: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (w *blockingFinishWriter) Write(value []byte) (int, error) {
+	if bytes.Equal(value, []byte{'\n'}) {
+		w.once.Do(func() { close(w.finishing) })
+		<-w.release
+	}
+	return w.buffer.Write(value)
 }
 
 func waitRunSignal(t testing.TB, signal <-chan struct{}, name string) {

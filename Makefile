@@ -126,13 +126,16 @@ cli-proof: ## Build and verify the compiled CLI contract.
 	kill -STOP "$$pi_pid"; \
 	kill -INT "$$force_pid"; \
 	sleep 0.1; \
+	force_started="$$(python3 -c 'import time; print(time.monotonic())')"; \
 	kill -INT "$$force_pid"; \
 	if wait "$$force_pid"; then force_rc=0; else force_rc=$$?; fi; \
+	force_finished="$$(python3 -c 'import time; print(time.monotonic())')"; \
+	python3 -c 'import sys; elapsed = float(sys.argv[1]) - float(sys.argv[2]); assert elapsed < 5, f"second interrupt took {elapsed:.3f}s"' "$$force_finished" "$$force_started"; \
 	test "$$force_rc" -eq 130; \
 	if kill -0 "$$pi_pid" 2>/dev/null; then echo "second interrupt left pi alive" >&2; kill -KILL "$$pi_pid"; exit 1; fi; \
 	python3 -c "import json; d=json.load(open('.gibson/state.json')); assert all(s['status']=='stopped' and s['pid']==0 for s in d['sessions'].values())"; \
 	printf 'SECOND_INTERRUPT_EXIT=%s\n' "$$force_rc"; \
-	printf '%s\n' 'SECOND_INTERRUPT_ORPHANS=0' 'SECOND_INTERRUPT_REGISTRY=stopped,pid=0'; \
+	printf '%s\n' 'SECOND_INTERRUPT_PROMPT=true' 'SECOND_INTERRUPT_ORPHANS=0' 'SECOND_INTERRUPT_REGISTRY=stopped,pid=0'; \
 	if FAKEPI_SCENARIO=crash_mid_stream "$$gibson" run quick 'Crash now' >"$$sandbox/crash.stdout" 2>"$$sandbox/crash.stderr"; then \
 		echo "expected crash scenario to fail" >&2; \
 		exit 1; \

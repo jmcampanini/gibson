@@ -215,6 +215,22 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		}
 		return finisher.finishInterrupt(RunInterrupted, runErr, dependencies.interrupts)
 	}
+	finishCancelled := func() (RunOutcome, error) {
+		runErr := errors.Join(presenter.finalAssistantErr, presenter.finishText())
+		return finisher.finish(RunInterrupted, runErr)
+	}
+	finishExited := func(runErr error) (RunOutcome, error) {
+		interrupted := interrupt.started
+		if !interrupted {
+			select {
+			case <-interrupts:
+				interrupted = true
+				presenter.suppressText = true
+			default:
+			}
+		}
+		return finisher.finishExited(interrupted, runErr)
+	}
 	handleInterrupt := func() (bool, RunOutcome, error) {
 		if interrupt.started {
 			outcome, err := finishInterrupted(true, nil)
@@ -287,7 +303,7 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 	for promptResults == nil {
 		select {
 		case <-ctx.Done():
-			return finisher.finish(RunInterrupted, presenter.finishText())
+			return finishCancelled()
 		case <-interrupts:
 			if interruptBeforePrompt {
 				return finisher.finishForced(RunInterrupted, presenter.finishText())
@@ -304,12 +320,13 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 					default:
 					}
 				}
-				runErr := errors.Join(fmt.Errorf("prompt pi: %w", result.err), presenter.finishText())
+				promptErr := fmt.Errorf("prompt pi: %w", result.err)
 				if interruptBeforePrompt {
+					runErr := errors.Join(promptErr, presenter.finishText())
 					return finisher.finishInterrupt(RunInterrupted, runErr, interrupts)
 				}
-				outcome, classifiedErr := classifyRunError(ctx, runErr)
-				return finisher.finish(outcome, classifiedErr)
+				outcome, classifiedErr := classifyRunError(ctx, promptErr)
+				return finisher.finish(outcome, errors.Join(classifiedErr, presenter.finishText()))
 			}
 			promptResults = result.acceptance
 			if interruptBeforePrompt {
@@ -323,10 +340,7 @@ promptWait:
 	for {
 		select {
 		case <-ctx.Done():
-			if err := presenter.finishText(); err != nil {
-				return finisher.finish(RunCompleted, err)
-			}
-			return finisher.finish(RunInterrupted, nil)
+			return finishCancelled()
 		case <-interrupts:
 			if done, outcome, interruptErr := handleInterrupt(); done {
 				return outcome, interruptErr
@@ -337,7 +351,7 @@ promptWait:
 			}
 		case event, open := <-events:
 			if !open {
-				return finisher.finishExited(interrupt.started, errors.Join(interrupt.err, presenter.finishText()))
+				return finishExited(errors.Join(interrupt.err, presenter.finishText()))
 			}
 			settled, eventErr := handleEvent(event)
 			if eventErr != nil {
@@ -397,7 +411,7 @@ promptWait:
 			select {
 			case event, open := <-events:
 				if !open {
-					return finisher.finishExited(interrupt.started, errors.Join(interrupt.err, presenter.finishText()))
+					return finishExited(errors.Join(interrupt.err, presenter.finishText()))
 				}
 				settled, eventErr := handleEvent(event)
 				if eventErr != nil {
@@ -463,10 +477,7 @@ promptWait:
 
 		select {
 		case <-ctx.Done():
-			if err := presenter.finishText(); err != nil {
-				return finisher.finish(RunCompleted, err)
-			}
-			return finisher.finish(RunInterrupted, nil)
+			return finishCancelled()
 		case <-interrupts:
 			if done, outcome, interruptErr := handleInterrupt(); done {
 				return outcome, interruptErr
@@ -477,7 +488,7 @@ promptWait:
 			}
 		case event, open := <-events:
 			if !open {
-				return finisher.finishExited(interrupt.started, errors.Join(interrupt.err, presenter.finishText()))
+				return finishExited(errors.Join(interrupt.err, presenter.finishText()))
 			}
 			settled, eventErr := handleEvent(event)
 			if eventErr != nil {
@@ -621,6 +632,7 @@ func runSessionStreaming(stateRaw json.RawMessage) (bool, error) {
 	return state.IsStreaming, nil
 }
 
+// Callers classify the primary error before joining secondary diagnostics.
 func classifyRunError(ctx context.Context, err error) (RunOutcome, error) {
 	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, ctx.Err())) {
 		return RunInterrupted, nil
