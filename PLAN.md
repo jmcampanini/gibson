@@ -399,6 +399,26 @@ that prevent the already-specified behavior from passing.
   scaffolding; retain its narrow session interface only if it still represents a genuine
   production boundary after the final fake-pi scenarios land.
 
+### Review cleanup carried into M1 completion
+
+At this step, revalidate each final post-Chunk-5 review finding against the completed M1
+workflow. Fix it at its faithful owner or record an explicit later-milestone disposition;
+do not silently drop it and do not pull unrelated HTTP or browser scope forward.
+
+- [ ] Make pre-prompt startup interruption coherent: no prompt or tool work begins after a
+  buffered SIGINT, startup cancellation maps to exit 130, and a second interrupt can force
+  a stalled readiness/version path.
+- [ ] Harden Linux process-disappearance handling: treat `ESRCH` as not-exists, prevent
+  unrelated per-PID churn from aborting the whole cleanup scan, and do not permanently
+  latch root disappearance from a transient identity-read error.
+- [ ] Decide and prove the maximum single-interrupt wait when pi accepts an abort write but
+  never responds, preserving the durable-abort preference and immediate second-interrupt
+  escape hatch.
+- [ ] Narrow `GetEntries` cursor classification so only pi's actual missing-entry response
+  becomes `ErrInvalidCursor`; preserve unrelated command failures for future consumers.
+- [ ] Preserve useful diagnostics when cancellation races another failure while retaining
+  exit 130, and avoid presenting an empty session-file field before pi reports the path.
+
 ### Dependencies
 
 Chunks 1–7.

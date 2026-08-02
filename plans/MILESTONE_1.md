@@ -541,6 +541,28 @@ fakepi integration (default run):
 Real-pi gated (`GIBSON_TEST_REAL_PI=1`): the no-network lifecycle and deterministic
 prompt-ordering tests of §4.12.
 
+### Final review cleanup gate
+
+Before the complete M1 acceptance run, revalidate the final post-Chunk-5 review findings
+against the assembled milestone. Each item must either be fixed at the faithful test layer
+or explicitly assigned to its owning later milestone with rationale:
+
+- Pre-prompt SIGINT: cancel stalled version/readiness work, never submit a prompt after the
+  buffered interrupt, preserve exit 130, and let a second interrupt force cleanup.
+- Linux process churn: treat `ESRCH` as process disappearance, keep one vanishing unrelated
+  `/proc` entry from aborting the whole cleanup scan, and reserve permanent `rootGone` for
+  a confirmed missing or changed root identity rather than a transient read error.
+- Wedged abort: decide and prove a bounded single-interrupt policy without weakening the
+  durable-abort path or second-interrupt force behavior.
+- Cursor semantics: map only pi's missing-entry response to `ErrInvalidCursor`, leaving
+  unrelated command failures intact before `GetEntries` gains broader consumers.
+- Interrupted diagnostics: retain useful racing errors with the exit-130 outcome and omit
+  an unknown session-file field until the path has been reported.
+
+After the cleanup dispositions, rerun `make verify`, the gated real-pi lifecycle tests,
+and the complete compiled-binary M1 proof below. The milestone cannot close on a cleanup
+change that lacks its agent-verified end-to-end evidence.
+
 ## 8. Agent-verified proof workflow
 
 Run by an agent against a real build with real pi (MILESTONES M1 proof). Commands are
