@@ -145,53 +145,88 @@ func (c *rpcClient) commandWithWritePolicy(ctx context.Context, command string, 
 		return nil, c.transportFailure()
 	}
 
+	var writeErr error
+	haveWriteResult := false
+	transportStopped := false
 	select {
-	case err := <-request.result:
-		writeTimer.Stop()
-		if err != nil {
-			return nil, fmt.Errorf("write pi RPC command %q: %w", command, err)
-		}
-		if written != nil {
-			close(written)
-		}
+	case writeErr = <-request.result:
+		haveWriteResult = true
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.closing:
-		return nil, c.transportFailure()
+		transportStopped = true
 	case <-c.writerDone:
-		return nil, c.transportFailure()
+		transportStopped = true
 	}
-
-	var timeout <-chan time.Time
-	var responseTimer *time.Timer
-	if policy == boundedResponseWait {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return nil, timeoutErr
+	if !haveWriteResult {
+		select {
+		case writeErr = <-request.result:
+			haveWriteResult = true
+		default:
 		}
-		responseTimer = time.NewTimer(remaining)
-		defer responseTimer.Stop()
-		timeout = responseTimer.C
 	}
-
 	var result responseResult
+	haveEarlyResponse := false
 	select {
 	case result = <-response:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-timeout:
-		return nil, timeoutErr
-	case <-c.closing:
+		haveEarlyResponse = true
+	default:
+	}
+	writeTimer.Stop()
+
+	validEarlyResponse := haveEarlyResponse && len(result.raw) > 0
+	if !validEarlyResponse && haveWriteResult && writeErr != nil {
 		select {
-		case result = <-response:
+		case <-c.closing:
+			return nil, writeErr
 		default:
+			return nil, fmt.Errorf("write pi RPC command %q: %w", command, writeErr)
+		}
+	}
+	if !validEarlyResponse && !haveWriteResult {
+		if haveEarlyResponse && result.err != nil {
+			return nil, result.err
+		}
+		if transportStopped {
 			return nil, c.transportFailure()
 		}
-	case <-c.writerDone:
+	}
+	writeConfirmed := validEarlyResponse || (haveWriteResult && writeErr == nil)
+	if written != nil && writeConfirmed {
+		close(written)
+	}
+
+	if !haveEarlyResponse {
+		var timeout <-chan time.Time
+		var responseTimer *time.Timer
+		if policy == boundedResponseWait {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, timeoutErr
+			}
+			responseTimer = time.NewTimer(remaining)
+			defer responseTimer.Stop()
+			timeout = responseTimer.C
+		}
+
 		select {
 		case result = <-response:
-		default:
-			return nil, c.transportFailure()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timeout:
+			return nil, timeoutErr
+		case <-c.closing:
+			select {
+			case result = <-response:
+			default:
+				return nil, c.transportFailure()
+			}
+		case <-c.writerDone:
+			select {
+			case result = <-response:
+			default:
+				return nil, c.transportFailure()
+			}
 		}
 	}
 	if result.err != nil {

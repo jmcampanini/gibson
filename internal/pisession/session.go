@@ -71,12 +71,20 @@ func Spawn(ctx context.Context, cfg Config) (*Session, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(cfg.StderrPath), 0o755); err != nil {
+	stderrDir := filepath.Dir(cfg.StderrPath)
+	if err := os.MkdirAll(stderrDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create pi stderr directory: %w", err)
+	}
+	if err := os.Chmod(stderrDir, 0o755); err != nil {
+		return nil, fmt.Errorf("set pi stderr directory permissions: %w", err)
 	}
 	stderr, err := os.OpenFile(cfg.StderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open pi stderr log: %w", err)
+	}
+	if err := stderr.Chmod(0o644); err != nil {
+		_ = stderr.Close()
+		return nil, fmt.Errorf("set pi stderr log permissions: %w", err)
 	}
 
 	argv := buildArgv(cfg.PiBin, cfg.SessionID, cfg.SessionDir, cfg.Model, cfg.Thinking, cfg.ExtraArgs)

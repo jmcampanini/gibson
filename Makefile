@@ -52,11 +52,8 @@ cli-proof: ## Build and verify the compiled CLI contract.
 	printf '%s\n' "$$serve_help" | grep -Fq -- '--port'; \
 	printf '%s\n' "$$serve_help" | grep -Fq -- '--dev'; \
 	run_help="$$($$gibson run --help)"; \
-	printf '%s\n' "$$run_help" | grep -Fq -- 'run <type> <message>'; \
-	if printf '%s\n' "$$run_help" | grep -Fq -- '--checkout'; then \
-		echo "run exposed --checkout before Chunk 6" >&2; \
-		exit 1; \
-	fi; \
+	printf '%s\n' "$$run_help" | grep -Fq -- 'run <type> <message> [--checkout <name>]'; \
+	printf '%s\n' "$$run_help" | grep -Fq -- '--checkout'; \
 	if error_output="$$($$gibson serve unexpected 2>&1)"; then \
 		echo "expected positional arguments to fail" >&2; \
 		exit 1; \
@@ -93,6 +90,33 @@ cli-proof: ## Build and verify the compiled CLI contract.
 	test "$$unknown_rc" -eq 1; \
 	test "$$(printf '%s\n' "$$unknown_output" | wc -l | tr -d ' ')" -eq 1; \
 	case "$$unknown_output" in 'gibson: error: '*'configured types: quick'*) ;; *) echo "unknown type error did not list configured types" >&2; exit 1;; esac; \
+	git worktree add ../wt-x -b wt-x -q; \
+	main_sessions_before="$$(find .gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')"; \
+	named_stdout="$$($$gibson run quick 'Named checkout' --checkout wt-x 2>"$$sandbox/named.stderr")"; \
+	test "$$named_stdout" = 'Hello from fake pi.'; \
+	test "$$main_sessions_before" = "$$(find .gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')"; \
+	test "$$(find ../wt-x/.gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')" -eq 1; \
+	test "$$(find ../wt-x/.gibson/logs -type f -name '*.stderr.log' | wc -l | tr -d ' ')" -eq 1; \
+	python3 -c "import glob,json,os; p=glob.glob('../wt-x/.gibson/sessions/*.jsonl'); assert len(p)==1; h=json.loads(open(p[0]).readline()); d=json.load(open('../wt-x/.gibson/state.json')); assert h['id'] in d['sessions']; assert h['cwd']==os.path.realpath('../wt-x'); assert d['sessions'][h['id']]['status']=='stopped' and d['sessions'][h['id']]['pid']==0"; \
+	mkdir "$$sandbox/not-git"; \
+	for invalid in '../outside' missing not-git; do \
+		before_main="$$(find .gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')"; \
+		before_target="$$(find ../wt-x/.gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')"; \
+		if invalid_output="$$($$gibson run quick invalid --checkout "$$invalid" 2>&1)"; then echo "expected checkout $$invalid to fail" >&2; exit 1; else invalid_rc=$$?; fi; \
+		test "$$invalid_rc" -eq 1; \
+		case "$$invalid_output" in 'gibson: error: '*) ;; *) echo "invalid checkout error missing process prefix" >&2; exit 1;; esac; \
+		test "$$before_main" = "$$(find .gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')"; \
+		test "$$before_target" = "$$(find ../wt-x/.gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')"; \
+	done; \
+	$$gibson run quick 'Concurrent A' --checkout wt-x >"$$sandbox/concurrent-a.stdout" 2>"$$sandbox/concurrent-a.stderr" & concurrent_a=$$!; \
+	$$gibson run quick 'Concurrent B' --checkout wt-x >"$$sandbox/concurrent-b.stdout" 2>"$$sandbox/concurrent-b.stderr" & concurrent_b=$$!; \
+	wait "$$concurrent_a"; wait "$$concurrent_b"; \
+	python3 -c "import json; d=json.load(open('../wt-x/.gibson/state.json')); assert len(d['sessions'])==3; assert all(s['status']=='stopped' and s['pid']==0 for s in d['sessions'].values())"; \
+	test "$$(find ../wt-x/.gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')" -eq 3; \
+	python3 -c "import glob,os,stat; roots=['.gibson','../wt-x/.gibson']; assert all(stat.S_IMODE(os.stat(p).st_mode)==0o755 for r in roots for p in (r,r+'/sessions',r+'/logs')); assert all(stat.S_IMODE(os.stat(p).st_mode)==0o644 for r in roots for p in [r+'/state.json']+glob.glob(r+'/logs/*.stderr.log'))"; \
+	test -z "$$(git status --porcelain)"; \
+	test -z "$$(git -C ../wt-x status --porcelain)"; \
+	printf '%s\n' 'NAMED_CHECKOUT=wt-x' 'NAMED_CHECKOUT_ARTIFACT_ISOLATION=true' 'INVALID_CHECKOUTS_REJECTED=traversal,missing,non-git' 'CONCURRENT_REGISTRY_RECORDS=preserved' 'STORAGE_PERMISSIONS=0755,0644' 'CHECKOUT_GIT_STATUS=clean'; \
 	FAKEPI_SCENARIO=slow_stream python3 -c 'import os, sys; os.setpgid(0, 0); os.execv(sys.argv[1], sys.argv[1:])' "$$gibson" run quick 'Stream until interrupted' >"$$sandbox/interrupt.stdout" 2>"$$sandbox/interrupt.stderr" & \
 	interrupt_pid=$$!; \
 	for attempt in $$(seq 1 100); do \

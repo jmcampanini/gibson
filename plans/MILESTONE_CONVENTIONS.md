@@ -224,13 +224,24 @@ field, so nothing goes stale on rename):
   (e.g. `s-20260726-k3v9qx`). Matches pi's id regex; date prefix makes ids scannable.
   Regenerate on collision against registry + `sessions/` contents. Gibson session id
   **is** the pi session id — one id, passed via `--session-id`.
-- Writes: process-local serialization plus a per-checkout cross-process lock. Every
-  read-modify-write mutation reloads the latest `state.json` while holding the lock and
+- Writes: process-local serialization plus an advisory cross-process lock on the stable
+  per-checkout `.gibson/` directory itself; no lock file is created. Every read-modify-write mutation reloads the latest `state.json` while holding the lock and
   completes its write-temp-then-rename replacement before unlocking. Readers therefore
   see either the previous complete file or the next complete file, while concurrent
   `gibson run` invocations—or a run overlapping the workspace server—cannot lose one
   another's updates. One server still governs each workspace, but it is not the only
   process that may mutate a checkout registry.
+- Fresh-session allocation holds that same lock from registry/header collision scanning
+  through pi readiness and the first live-record replacement. Startup is serialized only
+  within one checkout and creates no reservation artifact. A failed live replacement stops
+  the spawned process through its creation rollback before unlocking, then reconciles any
+  possibly committed record to stopped. Later ambiguous cleanup may stop only a live record
+  whose diagnostic pid matches the process being cleaned up.
+- Lifecycle transitions allow idempotent same-state writes plus `live→stopped|closed`,
+  `stopped→live|closed`, and `closed→live`; `closed→stopped` is invalid. Live requires a
+  positive diagnostic pid, and a same-state live write cannot replace a different live
+  pid; stopped and closed force pid zero. Status changes preserve all
+  other metadata.
 - Rebuild (SPEC §4.1.2): if `state.json` is missing, scan `sessions/*.jsonl`, take the id
   from each file's session header line and the name from the latest `session_info` entry;
   status `stopped`, type `""`, timestamps from header/mtime.
@@ -255,7 +266,8 @@ field, so nothing goes stale on rename):
   per-client, §4.3).
 - **Command correlation:** gibson sets `id` = `c-<n>` (per-process atomic counter) on
   every command; a map `id → chan response` resolves replies; 30s default timeout →
-  `pi_error`. Terminal output closure fails pending commands and closes input.
+  `pi_error`. Terminal output closure fails pending commands and closes input; a response
+  already demultiplexed for its command wins if closure races local write completion.
   `extension_ui_response` writes use pi's request uuid and expect no reply.
 - **Spawn/readiness sequence (create or resume):** spawn → `get_state` as readiness probe
   → `set_session_name` (if name given at create) → `prompt`. REST create returns 201 only

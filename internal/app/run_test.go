@@ -87,6 +87,86 @@ func TestRunCompletesOneShotWorkflowWithFakePi(t *testing.T) {
 	assert.Empty(t, status)
 }
 
+func TestRunTargetsNamedCheckoutWithIsolatedArtifacts(t *testing.T) {
+	piBin := pitest.BuildFakePi(t)
+	ws := testws.New(t,
+		testws.WithPiBin(piBin),
+		testws.WithSessionType("quick", config.SessionType{Description: "Quick task"}),
+		testws.WithSiblingCheckout("wt-x"),
+	)
+	target := filepath.Join(ws.Root, "wt-x")
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	dependencies.resolvePiBin = pisession.ResolvePiBin
+	dependencies.checkPiVersion = pisession.CheckPiVersion
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	outcome, err := run(context.Background(), RunOptions{
+		Type: "quick", Message: "Say hello", Checkout: "wt-x", Stdout: &stdout, Stderr: &stderr,
+	}, log.New(&stderr), dependencies)
+
+	require.NoError(t, err)
+	assert.Equal(t, RunCompleted, outcome)
+	assert.Equal(t, "Hello from fake pi.\n", stdout.String())
+	_, err = os.Stat(filepath.Join(ws.Checkout, ".gibson"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	registry := readRunRegistry(t, target)
+	require.Len(t, registry.Sessions, 1)
+	var record store.Record
+	for _, candidate := range registry.Sessions {
+		record = candidate
+	}
+	assert.Equal(t, store.StatusStopped, record.Status)
+	assert.Zero(t, record.PID)
+	sessionPath, err := store.Open(target).FindSessionFile(record.ID)
+	require.NoError(t, err)
+	contents, err := os.ReadFile(sessionPath)
+	require.NoError(t, err)
+	firstLine, _, _ := bytes.Cut(contents, []byte{'\n'})
+	var header struct {
+		ID  string `json:"id"`
+		CWD string `json:"cwd"`
+	}
+	require.NoError(t, json.Unmarshal(firstLine, &header))
+	assert.Equal(t, record.ID, header.ID)
+	assert.Equal(t, target, header.CWD)
+	assert.FileExists(t, filepath.Join(target, ".gibson", "logs", record.ID+".stderr.log"))
+	for _, checkout := range []string{ws.Checkout, target} {
+		status, err := exec.Command("git", "-C", checkout, "status", "--porcelain").Output()
+		require.NoError(t, err)
+		assert.Empty(t, status)
+	}
+}
+
+func TestRunRejectsInvalidCheckoutBeforePiResolutionOrSpawn(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	resolvedPi := false
+	spawned := false
+	dependencies.resolvePiBin = func(string) (string, error) {
+		resolvedPi = true
+		return "pi", nil
+	}
+	dependencies.spawn = func(context.Context, pisession.Config) (runSession, error) {
+		spawned = true
+		return nil, errors.New("unexpected spawn")
+	}
+
+	outcome, err := run(context.Background(), RunOptions{
+		Type: "quick", Message: "hello", Checkout: "../outside",
+	}, log.New(&bytes.Buffer{}), dependencies)
+
+	require.Error(t, err)
+	assert.Equal(t, RunCompleted, outcome)
+	assert.ErrorContains(t, err, "not a valid checkout name")
+	assert.False(t, resolvedPi)
+	assert.False(t, spawned)
+	_, statErr := os.Stat(filepath.Join(ws.Checkout, ".gibson"))
+	assert.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
 func TestRunBufferedInterruptCannotOvertakeFakePiPrompt(t *testing.T) {
 	t.Setenv("FAKEPI_SCENARIO", "slow_stream")
 	piBin := pitest.BuildFakePi(t)

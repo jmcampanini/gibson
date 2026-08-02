@@ -29,8 +29,22 @@ func TestRunCommandPassesArgumentsAndWriters(t *testing.T) {
 	assert.Equal(t, app.RunInterrupted, outcome)
 	assert.Equal(t, "review", got.Type)
 	assert.Equal(t, "Inspect this change", got.Message)
+	assert.Empty(t, got.Checkout)
 	assert.Same(t, &stdout, got.Stdout)
 	assert.Same(t, &stderr, got.Stderr)
+}
+
+func TestRunCommandPassesCheckout(t *testing.T) {
+	var got app.RunOptions
+	outcome := app.RunCompleted
+	command := newRunCommand(func(_ context.Context, options app.RunOptions) (app.RunOutcome, error) {
+		got = options
+		return app.RunCompleted, nil
+	}, &outcome)
+	command.SetArgs([]string{"review", "Inspect this change", "--checkout", "feature"})
+
+	require.NoError(t, command.Execute())
+	assert.Equal(t, "feature", got.Checkout)
 }
 
 func TestRunCommandRequiresTypeAndMessage(t *testing.T) {
