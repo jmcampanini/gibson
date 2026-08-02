@@ -373,6 +373,9 @@ likely to corrupt a subprocess integration, while keeping full dialog UX outside
   blocking requests and let Ctrl+C follow Chunk 5's durable abort path.
 - [ ] Exercise tool activity, notifications, agent-reported errors, backpressure, and close
   ordering through the composed application boundary.
+- [ ] Add a deterministic transport test proving that a response already demultiplexed for
+  its command wins when terminal closure races local write completion, while a fatal write
+  failure still resolves pending commands consistently.
 - [ ] Preserve raw pi-owned JSON and valid session files throughout every hostile scenario.
 
 ### Dependencies
@@ -390,6 +393,8 @@ Chunks 1–6.
 - [ ] Tool, notification, and error diagnostics stay on stderr while stdout remains only
   assistant text.
 - [ ] Full event-channel backpressure and shutdown ordering remain race-clean.
+- [ ] The response-versus-closure transport contract is owned by a deterministic test
+  before D-017 changes command wait policy.
 - [ ] `make check` passes.
 
 ### Mandatory approval gate
@@ -425,8 +430,9 @@ workflow. Fix it at its faithful owner or record an explicit later-milestone dis
 do not silently drop it and do not pull unrelated HTTP or browser scope forward.
 
 - [ ] Make pre-prompt startup interruption coherent: no prompt or tool work begins after a
-  buffered SIGINT, startup cancellation maps to exit 130, and a second interrupt can force
-  a stalled readiness/version path.
+  buffered SIGINT, startup cancellation maps to exit 130, the checkout allocation-lock
+  wait is interruptible, and a second interrupt can force a stalled readiness/version
+  path.
 - [ ] Harden Linux process-disappearance handling: treat `ESRCH` as not-exists, prevent
   unrelated per-PID churn from aborting the whole cleanup scan, and do not permanently
   latch root disappearance from a transient identity-read error.
@@ -437,6 +443,10 @@ do not silently drop it and do not pull unrelated HTTP or browser scope forward.
   becomes `ErrInvalidCursor`; preserve unrelated command failures for future consumers.
 - [ ] Preserve useful diagnostics when cancellation races another failure while retaining
   exit 130, and avoid presenting an empty session-file field before pi reports the path.
+- [ ] Remove the unused `NewSessionID` export or document that it does not reserve the
+  returned ID; keep `CreateSession` as the only safe allocation-and-creation path.
+- [ ] Make registry reads return strict load and validation errors instead of presenting a
+  corrupt registry as empty or not found; complete this before M2 adopts the read surface.
 
 ### Dependencies
 

@@ -270,6 +270,13 @@ Corrupt `state.json` (unparsable JSON): rename to `state.json.corrupt-<unix-ts>`
 rebuild per §4.1.2, log prominently. Registry lifecycle is M6's remit (MS coverage
 map §4) and silent data loss is worse than a quarantined file.
 
+M1 deliberately fails closed when a session JSONL has an empty, malformed, unreadable,
+or duplicate header, so the offending checkout requires manual repair before another
+session can be allocated. M6 owns a recovery policy as part of rebuild: preserve the
+original bytes, identify every affected path in a prominent diagnostic, and either
+quarantine or skip invalid files only under an explicit rebuild operation. Normal M1
+allocation remains strict; recovery must never discard a file silently.
+
 ### 4.5 History for non-live sessions: parse the JSONL (decided, justified)
 
 For `stopped`/`closed` sessions, `/history` and the SSE connect fetch step read the

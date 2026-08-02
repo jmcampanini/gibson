@@ -95,6 +95,8 @@ func TestRunTargetsNamedCheckoutWithIsolatedArtifacts(t *testing.T) {
 		testws.WithSiblingCheckout("wt-x"),
 	)
 	target := filepath.Join(ws.Root, "wt-x")
+	physicalTarget, err := filepath.EvalSymlinks(target)
+	require.NoError(t, err)
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
 	dependencies.resolvePiBin = pisession.ResolvePiBin
@@ -130,7 +132,7 @@ func TestRunTargetsNamedCheckoutWithIsolatedArtifacts(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(firstLine, &header))
 	assert.Equal(t, record.ID, header.ID)
-	assert.Equal(t, target, header.CWD)
+	assert.Equal(t, physicalTarget, header.CWD)
 	assert.FileExists(t, filepath.Join(target, ".gibson", "logs", record.ID+".stderr.log"))
 	for _, checkout := range []string{ws.Checkout, target} {
 		status, err := exec.Command("git", "-C", checkout, "status", "--porcelain").Output()
