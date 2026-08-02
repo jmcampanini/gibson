@@ -255,16 +255,19 @@ field, so nothing goes stale on rename):
   per-client, §4.3).
 - **Command correlation:** gibson sets `id` = `c-<n>` (per-process atomic counter) on
   every command; a map `id → chan response` resolves replies; 30s default timeout →
-  `pi_error`. `extension_ui_response` writes use pi's request uuid and expect no reply.
+  `pi_error`. Terminal output closure fails pending commands and closes input.
+  `extension_ui_response` writes use pi's request uuid and expect no reply.
 - **Spawn/readiness sequence (create or resume):** spawn → `get_state` as readiness probe
   → `set_session_name` (if name given at create) → `prompt`. REST create returns 201 only
   after the prompt is accepted.
 - **Process ownership and shutdown:** pi runs in a dedicated process group so terminal
   Ctrl+C reaches Gibson without preempting RPC abort. Close signals that group with
-  SIGTERM. Gibson tracks descendant PID/PGID/start-time identities while pi is live and
-  kills still-matching tracked groups/processes on every exit. After 5s, forced escalation
-  freezes pi, takes a final descendant snapshot, and SIGKILLs owned descendants plus
-  pi's group. The waiter reaps pi independently of stdout EOF, drains final records for
+  SIGTERM. Gibson tracks descendant ownership by PID/start time while pi is live, refreshes
+  mutable PGID routing across detachment, and kills still-matching tracked processes on
+  every exit. It signals a descendant group only when its current leader is also owned.
+  After 5s, forced escalation freezes pi, takes a final descendant snapshot, and
+  SIGKILLs owned descendants plus pi's group. The waiter reaps pi independently of
+  stdout EOF, drains final records for
   up to 500ms, then closes the owned pipe so inherited descriptors cannot hang
   completion. Registry → `closed`
   (user close) or `stopped` (server shutdown). Unexpected pi exit: registry → `stopped`,

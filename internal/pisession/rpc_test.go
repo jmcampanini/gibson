@@ -300,6 +300,30 @@ func TestRPCCommandFailuresAndTimeouts(t *testing.T) {
 		waitFor(t, client.writerDone, "RPC writer")
 	})
 
+	t.Run("output EOF fails a pending prompt", func(t *testing.T) {
+		piOutput, writePiOutput := io.Pipe()
+		readCommands, piInput := io.Pipe()
+		client := newRPCClient(piOutput, piInput, nil)
+		client.commandTimeout = time.Second
+		result := make(chan error, 1)
+
+		go func() {
+			_, err := client.commandWithPolicy(context.Background(), "prompt", map[string]any{"message": "waiting"}, unboundedResponseWait)
+			result <- err
+		}()
+		_, err := bufio.NewReader(readCommands).ReadBytes('\n')
+		require.NoError(t, err)
+		require.NoError(t, writePiOutput.Close())
+
+		promptErr := <-result
+		require.ErrorIs(t, promptErr, ErrTransportClosed)
+		require.ErrorIs(t, promptErr, io.EOF)
+		waitFor(t, client.pumpDone, "RPC pump")
+		waitFor(t, client.writerDone, "RPC writer")
+		_, err = readCommands.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF)
+	})
+
 	t.Run("default command timeout and late response", func(t *testing.T) {
 		input, source := io.Pipe()
 		output := &synchronizedBuffer{}
@@ -415,8 +439,9 @@ func TestRPCCommandFailuresAndTimeouts(t *testing.T) {
 }
 
 func TestRPCPromptWriteTimeoutIsFatal(t *testing.T) {
+	input, source := io.Pipe()
 	writer := newBlockingWriteCloser()
-	client := newRPCClient(bytes.NewReader(nil), writer, nil)
+	client := newRPCClient(input, writer, nil)
 	client.commandTimeout = 40 * time.Millisecond
 
 	promptResult := make(chan error, 1)
@@ -443,6 +468,8 @@ func TestRPCPromptWriteTimeoutIsFatal(t *testing.T) {
 	default:
 		t.Fatal("write timeout did not close the transport")
 	}
+	require.NoError(t, source.Close())
+	waitFor(t, client.pumpDone, "RPC pump")
 }
 
 func TestRPCWriterCompletesShortWritesAndReportsFailures(t *testing.T) {
@@ -472,16 +499,18 @@ func TestRPCWriterCompletesShortWritesAndReportsFailures(t *testing.T) {
 	})
 
 	t.Run("write failure", func(t *testing.T) {
+		input, source := io.Pipe()
 		writeErr := errors.New("broken pipe")
-		client := newRPCClient(bytes.NewReader(nil), failingWriteCloser{err: writeErr}, nil)
+		client := newRPCClient(input, failingWriteCloser{err: writeErr}, nil)
 		client.commandTimeout = time.Second
 
 		_, err := client.command(context.Background(), "get_state", nil)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, writeErr)
 
-		waitFor(t, client.pumpDone, "RPC pump")
 		waitFor(t, client.writerDone, "RPC writer")
+		require.NoError(t, source.Close())
+		waitFor(t, client.pumpDone, "RPC pump")
 		client.close()
 	})
 }

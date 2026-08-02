@@ -182,9 +182,17 @@ func (c *rpcClient) commandWithWritePolicy(ctx context.Context, command string, 
 	case <-timeout:
 		return nil, timeoutErr
 	case <-c.closing:
-		return nil, c.transportFailure()
+		select {
+		case result = <-response:
+		default:
+			return nil, c.transportFailure()
+		}
 	case <-c.writerDone:
-		return nil, c.transportFailure()
+		select {
+		case result = <-response:
+		default:
+			return nil, c.transportFailure()
+		}
 	}
 	if result.err != nil {
 		return nil, result.err
@@ -357,6 +365,7 @@ func (c *rpcClient) runPump() {
 			if !errors.Is(err, io.EOF) {
 				c.logger.Error("pi RPC reader stopped", "error", err)
 			}
+			c.fail(fmt.Errorf("%w: read pi RPC output: %w", ErrTransportClosed, err))
 			return
 		}
 	}

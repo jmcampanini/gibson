@@ -274,7 +274,7 @@ func TestSessionCrashFailsPendingAndCompletesInOrder(t *testing.T) {
 		result <- err
 	}()
 
-	require.ErrorIs(t, <-result, ErrProcessExited)
+	require.ErrorIs(t, <-result, ErrTransportClosed)
 	var events []Event
 	for event := range session.Events() {
 		events = append(events, event)
@@ -381,6 +381,42 @@ func TestSessionUnexpectedExitKillsDetachedDescendants(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
+func TestSessionUnexpectedExitKillsReparentedDescendantAfterProcessGroupChange(t *testing.T) {
+	stateDir := t.TempDir()
+	pidFile := filepath.Join(stateDir, "transition.pid")
+	gateFile := filepath.Join(stateDir, "detach-now")
+	detachedFile := filepath.Join(stateDir, "detached")
+	script := fmt.Sprintf(
+		`GIBSON_TEST_DETACHED_HELPER=1 GIBSON_TEST_DETACHED_PID_FILE=%q GIBSON_TEST_DETACH_GATE=%q GIBSON_TEST_DETACHED_READY=%q %q -test.run '^TestSessionDetachedProcessHelper$' & while [ ! -s %q ]; do sleep 0.01; done; printf '{"type":"ready"}\n'; while [ ! -s %q ]; do sleep 0.01; done; printf '{"type":"final"}\n'; exit 7`,
+		pidFile,
+		gateFile,
+		detachedFile,
+		os.Args[0],
+		pidFile,
+		detachedFile,
+	)
+	session := startLifecycleProcess(t, script)
+	assert.Equal(t, "ready", receiveSessionEvent(t, session.Events()).Type)
+	detachedPID := readProcessID(t, pidFile)
+	t.Cleanup(func() { _ = signalProcessGroup(detachedPID, syscall.SIGKILL) })
+	require.NoError(t, session.processes.capture())
+	session.processes.stop()
+	require.NoError(t, os.WriteFile(gateFile, []byte("detach"), 0o600))
+	assert.Equal(t, "final", receiveSessionEvent(t, session.Events()).Type)
+
+	select {
+	case <-session.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not reap after descendant changed process group")
+	}
+	for range session.Events() {
+	}
+	require.Error(t, session.ExitErr())
+	require.Eventually(t, func() bool {
+		return !processExists(detachedPID)
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
 func TestSessionReapsWhenStdoutDescriptorRemainsOpen(t *testing.T) {
 	session, heldStdout := startLifecycleProcessHoldingStdout(t, `printf '{"type":"final"}\n'; exit 7`)
 	t.Cleanup(func() { _ = heldStdout.Close() })
@@ -400,12 +436,28 @@ func TestSessionDetachedProcessHelper(t *testing.T) {
 	if os.Getenv("GIBSON_TEST_DETACHED_HELPER") != "1" {
 		return
 	}
-	if err := syscall.Setpgid(0, 0); err != nil {
-		os.Exit(2)
-	}
 	pidFile := os.Getenv("GIBSON_TEST_DETACHED_PID_FILE")
-	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o600); err != nil {
+	gateFile := os.Getenv("GIBSON_TEST_DETACH_GATE")
+	if gateFile != "" {
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o600); err != nil {
+			os.Exit(2)
+		}
+		for {
+			if _, err := os.Stat(gateFile); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if err := syscall.Setpgid(0, 0); err != nil {
 		os.Exit(3)
+	}
+	if gateFile == "" {
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o600); err != nil {
+			os.Exit(4)
+		}
+	} else if err := os.WriteFile(os.Getenv("GIBSON_TEST_DETACHED_READY"), []byte("ready"), 0o600); err != nil {
+		os.Exit(5)
 	}
 	for {
 		time.Sleep(time.Hour)

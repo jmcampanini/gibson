@@ -230,12 +230,13 @@ pi exit, and repeated cleanup without expanding it into a sustained conversation
 - [x] On the first interrupt, send `abort`, keep draining until the aborted assistant
   message is durable and the agent settles, then stop and exit 130.
 - [x] On a second interrupt, force immediate shutdown and exit 130.
-- [x] Fail pending commands consistently when pi exits or a command times out.
+- [x] Fail pending commands consistently when pi exits, either RPC direction closes, or
+  a command times out.
 - [x] Isolate pi from Gibson's terminal process group so Ctrl+C reaches Gibson without
   preempting the durable RPC abort.
-- [x] Track pi descendants while pi is live, clean tracked ownership on unexpected exit,
-  and make close idempotent with full owned-process-tree SIGKILL only after the graceful
-  timeout.
+- [x] Track pi descendants while pi is live by PID/start identity across reparenting and
+  process-group changes, clean tracked ownership on unexpected exit, and make close
+  idempotent with full owned-process-tree SIGKILL only after the graceful timeout.
 - [x] Reap pi independently of stdout EOF, bound the final stdout drain, and guarantee
   shutdown can unblock inherited descriptors or a full event channel while preserving
   deterministic completion and channel-close ordering.

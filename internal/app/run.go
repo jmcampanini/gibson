@@ -654,7 +654,7 @@ func (f *runFinisher) finishInterrupt(outcome RunOutcome, runErr error, interrup
 
 func (f *runFinisher) finishWithClose(outcome RunOutcome, runErr error, force bool, interrupts <-chan os.Signal) (RunOutcome, error) {
 	closeErr := closeRunSession(f.session, force, interrupts)
-	if errors.Is(runErr, pisession.ErrProcessExited) {
+	if errors.Is(runErr, pisession.ErrProcessExited) || errors.Is(runErr, pisession.ErrTransportClosed) {
 		f.logCrashTail()
 	}
 	var registryErr error

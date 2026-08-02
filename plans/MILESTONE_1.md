@@ -41,7 +41,7 @@ New files (repo-relative):
 - `internal/pisession/session.go` — `Config`, `Spawn()`, `Session` (process lifecycle,
   typed command methods, `Events()`, `Close`), stderr capture.
 - `internal/pisession/errors.go` — `ErrInvalidCursor`, `ErrProcessExited`,
-  `ErrCommandTimeout`.
+  `ErrTransportClosed`, `ErrCommandTimeout`.
 - `internal/pisession/rpc_test.go`, `argv_test.go`, `session_test.go` (fakepi),
   `session_realpi_test.go` (gated).
 - `internal/store/store.go` — `.gibson/` layout creation and path helpers (SPEC §4.1).
@@ -115,8 +115,9 @@ JSON object + `\n`.
   id is removed, `ErrCommandTimeout` is returned, and a late response is logged and
   dropped. Prompt submission keeps the write bound but its response remains pending until
   caller cancellation, process exit, transport closure, or acceptance so pre-acceptance
-  extension dialogs can wait. A write timeout is fatal to the transport and fails every
-  pending command. The session method selects this policy; D-017 owns its conventions,
+  extension dialogs can wait. A write timeout or terminal output read is fatal to the
+  transport, closes stdin, and fails every pending command. The session method selects
+  this policy; D-017 owns its conventions,
   upstream-disposition, and M2 plan-gate reconciliation.
 - `success:false` responses resolve the waiter with an error wrapping pi's `error` string.
   rpc.md note: pi parse errors come back as `{"type":"response","command":"parse",
@@ -208,16 +209,19 @@ Goroutine topology per Session: writer, stdout pump, waiter. Pi stdout uses an e
 owned `os.Pipe`, not `StdoutPipe`, so the waiter calls `cmd.Wait()` independently of EOF
 without racing `exec.Cmd`'s pipe cleanup. After process exit it records the exit error,
 allows up to 500ms for buffered final records to drain, then closes the owned reader to
-unblock a descriptor inherited by a helper. It then fails all pending command waiters
-with `ErrProcessExited`, zeroes/clears the pending map, closes the stderr log file, closes
-`done`, and finally closes the events channel. Consumers therefore see `range Events()`
-end and can then read a fully-populated `ExitErr()`.
+unblock a descriptor inherited by a helper. Process exit fails pending command waiters;
+a terminal output read independently fails them with `ErrTransportClosed` and closes
+stdin so a still-live but unusable pi can be reaped. Cleanup zeroes/clears the pending
+map, closes the stderr log file, closes `done`, and finally closes the events channel.
+Consumers therefore see `range Events()` end and can then read a fully-populated
+`ExitErr()`.
 
 A lightweight process tracker snapshots pi descendants while pi is live and retains
-PID/PGID/start-time identities after reparenting. Before signaling a retained identity,
-shutdown requires the current process to match its tracked PGID and start time, limiting
-PID-reuse risk. The reaper kills matched tracked groups/processes on every exit path
-before publishing completion.
+PID/start-time ownership identities after reparenting. PGID is mutable routing data: it
+is refreshed while the PID/start identity still matches and is not required for an
+individual kill. Whole-group signaling requires a still-owned matching group leader,
+limiting both PID-reuse and unrelated-group risk. The reaper kills matched tracked
+groups/processes on every exit path before publishing completion.
 
 - `Close(ctx)`: mark closing (unsticks pump sends), signal pi's dedicated process group
   with SIGTERM, and wait up to 5s. Forced escalation freezes pi, takes a final descendant
@@ -421,14 +425,15 @@ than `go test`.
 4. `internal/pisession/event.go`, `errors.go`, `rpc.go` — transport core + unit tests
    (`rpc_test.go`) against in-memory pipes: framing table (chunked writes, `\r\n`,
    embedded U+2028/U+2029, >1MB line, EOF without trailing `\n`), correlation
-   (in-order/out-of-order replies, timeout, unmatched response dropped, `success:false`
-   error surface), write serialization under concurrent commands.
+   (in-order/out-of-order replies, timeout, terminal output closure, unmatched response
+   dropped, `success:false` error surface), write serialization under concurrent commands.
 5. `internal/pisession/argv.go` + `argv_test.go` — assembly table per §4.5
    (model/thinking present/absent, `extra_args` verbatim and last).
 6. `internal/pisession/session.go` — `Config`, `Spawn`, lifecycle per §4.5–§4.7;
    `session_test.go` against fakepi: spawn+probe, prompt→settled event stream, abort
    mid-`slow_stream`, `huge_entry`, `crash_mid_stream` (pending command gets
-   `ErrProcessExited`, `Done` fires, events channel closes last), `dialog_confirm` via
+   `ErrTransportClosed` when output EOF wins, `Done` fires, events channel closes last),
+   `dialog_confirm` via
    `RespondUI`, stderr capture file contents, `GetEntries` since-cursor + invalid cursor
    → `ErrInvalidCursor`, `Close` idempotence and 143 exit.
 7. `internal/store/` — `store.go`, `id.go`, `registry.go` + tests: id format/regex/
@@ -479,7 +484,8 @@ here so later plans may rely on them):
     recorded)
   - `Close(ctx) error` (SIGTERM→5s→SIGKILL), `Done() <-chan struct{}`,
     `ExitErr() error`, `PID() int`, `ID() string`
-- `pisession.ErrInvalidCursor`, `ErrProcessExited`, `ErrCommandTimeout`;
+- `pisession.ErrInvalidCursor`, `ErrProcessExited`, `ErrTransportClosed`,
+  `ErrCommandTimeout`;
   `pisession.ResolvePiBin(configured string) (string, error)` and
   `pisession.CheckPiVersion(ctx, bin) (VersionResult, error)` reused by `run`, with
   minimum/verified/newer behavior from §2.
@@ -521,8 +527,8 @@ fakepi integration (default run):
   contents.
 - Abort mid-`slow_stream`: stream stops, `stopReason:"aborted"` entry lands,
   `agent_settled` arrives, `Close` reaps cleanly.
-- `crash_mid_stream`: pending command errors `ErrProcessExited`; `Done` then channel
-  close ordering; stderr log captured.
+- `crash_mid_stream`: pending command errors `ErrTransportClosed` when stdout EOF wins
+  process observation; `Done` then channel close ordering; stderr log captured.
 - `dialog_confirm`: `RespondUI` releases the block (write path for M5).
 - `internal/app` one-shot integration per step 9 of §5, including outcomes that the
   process boundary maps to exit codes 0/1/130; `cmd/run_test.go` checks adaptation only.

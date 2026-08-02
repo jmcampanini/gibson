@@ -463,9 +463,11 @@ func (t *ownedProcessTracker) capture() error {
 	t.mu.Lock()
 	for pid, tracked := range t.owned {
 		record, ok := current[pid]
-		if !ok || record.pgid != tracked.pgid || record.started != tracked.started {
+		if !ok || record.started != tracked.started {
 			delete(t.owned, pid)
+			continue
 		}
+		t.owned[pid] = record
 	}
 	for _, record := range descendants {
 		t.owned[record.pid] = record
@@ -510,14 +512,15 @@ func (t *ownedProcessTracker) killTracked() error {
 	}
 	matched := make(map[int]processRecord)
 	for pid, tracked := range owned {
-		if record, ok := current[pid]; ok && record.pgid == tracked.pgid && record.started == tracked.started {
+		if record, ok := current[pid]; ok && record.started == tracked.started {
 			matched[pid] = record
 		}
 	}
 
 	groups := make(map[int]bool)
 	for _, record := range matched {
-		if record.pgid != t.rootPID {
+		leader, leaderOwned := matched[record.pgid]
+		if record.pgid != t.rootPID && leaderOwned && leader.pid == leader.pgid {
 			groups[record.pgid] = true
 		}
 	}
