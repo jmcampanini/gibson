@@ -259,10 +259,14 @@ field, so nothing goes stale on rename):
 - **Spawn/readiness sequence (create or resume):** spawn → `get_state` as readiness probe
   → `set_session_name` (if name given at create) → `prompt`. REST create returns 201 only
   after the prompt is accepted.
-- **Shutdown sequence** (close, and server shutdown for each live session): SIGTERM →
-  wait up to 5s → SIGKILL; reap; close pipes; registry → `closed` (user close) or
-  `stopped` (server shutdown). Unexpected pi exit: registry → `stopped`, emit `status`
-  event, log tail of stderr at error level.
+- **Process ownership and shutdown:** pi runs in a dedicated process group so terminal
+  Ctrl+C reaches Gibson without preempting RPC abort. Close signals that group with
+  SIGTERM → waits up to 5s → on forced escalation freezes pi, snapshots descendants,
+  and SIGKILLs owned descendant groups/processes plus pi's group. The waiter reaps pi
+  independently of stdout EOF, drains final records for up to 500ms, then closes the
+  owned pipe so inherited descriptors cannot hang completion. Registry → `closed`
+  (user close) or `stopped` (server shutdown). Unexpected pi exit: registry → `stopped`,
+  emit `status`, and log the stderr tail at error level.
 - **Version compatibility:** at startup run `pi --version`. The minimum is 0.82.0 and
   the 0.82.x line is verified. Versions below the minimum fail with an error naming the
   found and minimum versions; later minor or major versions are accepted and produce an unverified-line

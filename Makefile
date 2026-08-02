@@ -93,7 +93,7 @@ cli-proof: ## Build and verify the compiled CLI contract.
 	test "$$unknown_rc" -eq 1; \
 	test "$$(printf '%s\n' "$$unknown_output" | wc -l | tr -d ' ')" -eq 1; \
 	case "$$unknown_output" in 'gibson: error: '*'configured types: quick'*) ;; *) echo "unknown type error did not list configured types" >&2; exit 1;; esac; \
-	FAKEPI_SCENARIO=slow_stream "$$gibson" run quick 'Stream until interrupted' >"$$sandbox/interrupt.stdout" 2>"$$sandbox/interrupt.stderr" & \
+	FAKEPI_SCENARIO=slow_stream python3 -c 'import os, sys; os.setpgid(0, 0); os.execv(sys.argv[1], sys.argv[1:])' "$$gibson" run quick 'Stream until interrupted' >"$$sandbox/interrupt.stdout" 2>"$$sandbox/interrupt.stderr" & \
 	interrupt_pid=$$!; \
 	for attempt in $$(seq 1 100); do \
 		if test -s "$$sandbox/interrupt.stdout"; then break; fi; \
@@ -101,7 +101,7 @@ cli-proof: ## Build and verify the compiled CLI contract.
 		sleep 0.02; \
 	done; \
 	test -s "$$sandbox/interrupt.stdout"; \
-	kill -INT "$$interrupt_pid"; \
+	python3 -c 'import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGINT)' "$$interrupt_pid"; \
 	if wait "$$interrupt_pid"; then interrupt_rc=0; else interrupt_rc=$$?; fi; \
 	test "$$interrupt_rc" -eq 130; \
 	grep -Fq '"stopReason":"aborted"' .gibson/sessions/*.jsonl; \
@@ -113,8 +113,8 @@ cli-proof: ## Build and verify the compiled CLI contract.
 	fi; \
 	printf 'FIRST_INTERRUPT_EXIT=%s\n' "$$interrupt_rc"; \
 	printf 'FIRST_INTERRUPT_STDOUT='; tr '\n' ' ' <"$$sandbox/interrupt.stdout"; printf '\n'; \
-	printf '%s\n' 'FIRST_INTERRUPT_ABORTED_ENTRY=true' 'FIRST_INTERRUPT_ORPHANS=0' 'FIRST_INTERRUPT_REGISTRY=stopped,pid=0'; \
-	FAKEPI_SCENARIO=slow_stream "$$gibson" run quick 'Force shutdown' >"$$sandbox/force.stdout" 2>"$$sandbox/force.stderr" & \
+	printf '%s\n' 'FIRST_INTERRUPT_PROCESS_GROUP=true' 'FIRST_INTERRUPT_ABORTED_ENTRY=true' 'FIRST_INTERRUPT_ORPHANS=0' 'FIRST_INTERRUPT_REGISTRY=stopped,pid=0'; \
+	FAKEPI_SCENARIO=slow_stream python3 -c 'import os, sys; os.setpgid(0, 0); os.execv(sys.argv[1], sys.argv[1:])' "$$gibson" run quick 'Force shutdown' >"$$sandbox/force.stdout" 2>"$$sandbox/force.stderr" & \
 	force_pid=$$!; \
 	for attempt in $$(seq 1 100); do \
 		pi_pid="$$(python3 -c "import json; d=json.load(open('.gibson/state.json')); print(next((s['pid'] for s in d['sessions'].values() if s['status']=='live'), ''))")"; \
@@ -124,10 +124,10 @@ cli-proof: ## Build and verify the compiled CLI contract.
 	done; \
 	test -n "$$pi_pid"; \
 	kill -STOP "$$pi_pid"; \
-	kill -INT "$$force_pid"; \
+	python3 -c 'import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGINT)' "$$force_pid"; \
 	sleep 0.1; \
 	force_started="$$(python3 -c 'import time; print(time.monotonic())')"; \
-	kill -INT "$$force_pid"; \
+	python3 -c 'import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGINT)' "$$force_pid"; \
 	if wait "$$force_pid"; then force_rc=0; else force_rc=$$?; fi; \
 	force_finished="$$(python3 -c 'import time; print(time.monotonic())')"; \
 	python3 -c 'import sys; elapsed = float(sys.argv[1]) - float(sys.argv[2]); assert elapsed < 5, f"second interrupt took {elapsed:.3f}s"' "$$force_finished" "$$force_started"; \

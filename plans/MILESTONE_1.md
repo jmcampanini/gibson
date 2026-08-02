@@ -180,10 +180,12 @@ checkout; environment inherited; `pi_bin` from config else `exec.LookPath("pi")`
 `--name` is never passed — display names go through `set_session_name` (conventions §5);
 `gibson run` has no name flag (conventions §1 CLI tree) so it skips that step entirely.
 
-Spawn sequence (conventions §6): start process (stderr already wired to the log file,
-§4.7) → start pump/writer/waiter goroutines → `get_state` as readiness probe (proves the
-process is up and protocol-speaking; its response includes `sessionId`, `isStreaming`,
-`sessionFile` per rpc.md) → return the live `Session`. The caller then issues `prompt`.
+Spawn sequence (conventions §6): start pi in a dedicated process group so terminal
+signals sent to Gibson's foreground group cannot preempt RPC abort; stderr is already
+wired to the log file (§4.7). Then start pump/writer/waiter goroutines → `get_state` as
+readiness probe (proves the process is up and protocol-speaking; its response includes
+`sessionId`, `isStreaming`, `sessionFile` per rpc.md) → return the live `Session`. The
+caller then issues `prompt`.
 Per rpc.md, the `prompt` response means **accepted/queued, not completed** — completion
 is observed via events; and `streamingBehavior` (`"steer"`|`"followUp"`) is REQUIRED if
 the agent is already streaming, otherwise the command errors. `Prompt(ctx, msg, behavior)`
@@ -202,16 +204,20 @@ filename. `store.Store` (already rooted at one checkout, §4.8) exposes
 
 ### 4.6 Shutdown, abort, unexpected exit (SPEC §5.2, conventions §6)
 
-Goroutine topology per Session: writer, stdout pump, waiter. Reap ordering rule: the
-waiter calls `cmd.Wait()` only after the pump has exited on EOF/read-error (avoids the
-`StdoutPipe`+`Wait` race), then, in order: records the exit error, fails all pending
-command waiters with `ErrProcessExited`, zeroes/clears the pending map, closes the
-stderr log file, closes `done`, and finally closes the events channel. Consumers
-therefore see `range Events()` end and can then read a fully-populated `ExitErr()`.
+Goroutine topology per Session: writer, stdout pump, waiter. Pi stdout uses an explicitly
+owned `os.Pipe`, not `StdoutPipe`, so the waiter calls `cmd.Wait()` independently of EOF
+without racing `exec.Cmd`'s pipe cleanup. After process exit it records the exit error,
+allows up to 500ms for buffered final records to drain, then closes the owned reader to
+unblock a descriptor inherited by a helper. It then fails all pending command waiters
+with `ErrProcessExited`, zeroes/clears the pending map, closes the stderr log file, closes
+`done`, and finally closes the events channel. Consumers therefore see `range Events()`
+end and can then read a fully-populated `ExitErr()`.
 
-- `Close(ctx)`: mark closing (unsticks pump sends), SIGTERM → wait up to 5s → SIGKILL;
-  the kill closes pi's stdout → pump EOF → waiter reaps. Graceful pi exit under SIGTERM
-  is status 143 (SPEC §5.2.2). Idempotent.
+- `Close(ctx)`: mark closing (unsticks pump sends), signal pi's dedicated process group
+  with SIGTERM, and wait up to 5s. Forced escalation freezes pi, snapshots descendants,
+  SIGKILLs owned descendant groups/processes and pi's group, then reaps. This covers pi's
+  detached tool process groups when pi cannot run its own SIGTERM cleanup handler.
+  Graceful pi exit under SIGTERM is status 143 (SPEC §5.2.2). Idempotent.
 - `Abort(ctx)`: sends the `abort` command; pi replies `success:true` and the aborted
   assistant message carries `stopReason:"aborted"` (SPEC §6.2, rpc.md). Abort does NOT
   terminate the process — the caller keeps consuming events until `agent_settled`.

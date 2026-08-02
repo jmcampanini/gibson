@@ -1,6 +1,7 @@
 package pisession
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,6 +23,7 @@ import (
 const (
 	spawnCleanupTimeout  = 5 * time.Second
 	shutdownGraceTimeout = 5 * time.Second
+	stdoutDrainTimeout   = 500 * time.Millisecond
 )
 
 type Config struct {
@@ -44,6 +49,7 @@ type Session struct {
 	pid              int
 	cmd              *exec.Cmd
 	rpc              *rpcClient
+	stdout           io.Closer
 	stderr           *os.File
 	logger           *log.Logger
 	done             chan struct{}
@@ -79,24 +85,28 @@ func Spawn(ctx context.Context, cfg Config) (*Session, error) {
 	cmd.Dir = cfg.Cwd
 	cmd.Env = os.Environ()
 	cmd.Stderr = stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		_ = stderr.Close()
 		return nil, fmt.Errorf("open pi stdin: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	if err != nil {
 		_ = stdin.Close()
 		_ = stderr.Close()
 		return nil, fmt.Errorf("open pi stdout: %w", err)
 	}
+	cmd.Stdout = childStdout
 	if err := cmd.Start(); err != nil {
+		_ = childStdout.Close()
 		_ = stdout.Close()
 		_ = stdin.Close()
 		_ = stderr.Close()
 		return nil, fmt.Errorf("start pi: %w", err)
 	}
+	_ = childStdout.Close()
 
 	logger := cfg.Logger
 	if logger == nil {
@@ -107,6 +117,7 @@ func Spawn(ctx context.Context, cfg Config) (*Session, error) {
 		pid:              cmd.Process.Pid,
 		cmd:              cmd,
 		rpc:              newRPCClient(stdout, stdin, logger),
+		stdout:           stdout,
 		stderr:           stderr,
 		logger:           logger,
 		done:             make(chan struct{}),
@@ -273,8 +284,8 @@ func (s *Session) shutdown() {
 	default:
 	}
 
-	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		s.setShutdownError(fmt.Errorf("signal pi with SIGTERM: %w", err))
+	if err := signalProcessGroup(s.pid, syscall.SIGTERM); err != nil {
+		s.setShutdownError(fmt.Errorf("signal pi process group with SIGTERM: %w", err))
 		s.kill()
 		<-s.complete
 		return
@@ -300,8 +311,8 @@ func (s *Session) shutdown() {
 }
 
 func (s *Session) kill() {
-	if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		s.setShutdownError(fmt.Errorf("kill pi with SIGKILL: %w", err))
+	if err := killOwnedProcessTree(s.pid); err != nil {
+		s.setShutdownError(fmt.Errorf("kill pi process tree with SIGKILL: %w", err))
 	}
 }
 
@@ -336,12 +347,21 @@ func (s *Session) ID() string {
 }
 
 func (s *Session) reap() {
-	<-s.rpc.pumpDone
 	waitErr := s.cmd.Wait()
 
 	s.exitMu.Lock()
 	s.exitErr = waitErr
 	s.exitMu.Unlock()
+
+	_ = signalProcessGroup(s.pid, syscall.SIGKILL)
+	timer := time.NewTimer(stdoutDrainTimeout)
+	select {
+	case <-s.rpc.pumpDone:
+		if !timer.Stop() {
+			<-timer.C
+		}
+	case <-timer.C:
+	}
 
 	processErr := error(ErrProcessExited)
 	if waitErr != nil {
@@ -349,6 +369,10 @@ func (s *Session) reap() {
 	}
 	s.rpc.stop(processErr)
 	s.rpc.closeWriter()
+	if s.stdout != nil {
+		_ = s.stdout.Close()
+	}
+	<-s.rpc.pumpDone
 	<-s.rpc.writerDone
 	if err := s.stderr.Close(); err != nil {
 		s.logger.Error("close pi stderr log", "error", err)
@@ -356,6 +380,104 @@ func (s *Session) reap() {
 	close(s.done)
 	close(s.rpc.events)
 	close(s.complete)
+}
+
+func signalProcessGroup(pid int, signal syscall.Signal) error {
+	if err := syscall.Kill(-pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
+type processRecord struct {
+	pid  int
+	ppid int
+	pgid int
+}
+
+func killOwnedProcessTree(rootPID int) error {
+	var result error
+	if err := signalProcessGroup(rootPID, syscall.SIGSTOP); err != nil {
+		result = errors.Join(result, fmt.Errorf("stop root process group: %w", err))
+	}
+
+	records, err := listProcesses()
+	if err != nil {
+		result = errors.Join(result, err)
+	} else {
+		descendants := descendantsOf(rootPID, records)
+		ownedPIDs := map[int]bool{rootPID: true}
+		for _, record := range descendants {
+			ownedPIDs[record.pid] = true
+		}
+
+		groups := make(map[int]bool)
+		for _, record := range descendants {
+			if ownedPIDs[record.pgid] && record.pgid != rootPID {
+				groups[record.pgid] = true
+			}
+		}
+		groupIDs := make([]int, 0, len(groups))
+		for pgid := range groups {
+			groupIDs = append(groupIDs, pgid)
+		}
+		sort.Ints(groupIDs)
+		for _, pgid := range groupIDs {
+			if err := signalProcessGroup(pgid, syscall.SIGKILL); err != nil {
+				result = errors.Join(result, fmt.Errorf("kill descendant process group %d: %w", pgid, err))
+			}
+		}
+		for _, record := range descendants {
+			if err := syscall.Kill(record.pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				result = errors.Join(result, fmt.Errorf("kill descendant process %d: %w", record.pid, err))
+			}
+		}
+	}
+	if err := signalProcessGroup(rootPID, syscall.SIGKILL); err != nil {
+		result = errors.Join(result, fmt.Errorf("kill root process group: %w", err))
+	}
+	return result
+}
+
+func listProcesses() ([]processRecord, error) {
+	output, err := exec.Command("/bin/ps", "-axo", "pid=,ppid=,pgid=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("list process tree: %w", err)
+	}
+	lines := bytes.Split(output, []byte{'\n'})
+	records := make([]processRecord, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Fields(string(line))
+		if len(fields) != 3 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		ppid, ppidErr := strconv.Atoi(fields[1])
+		pgid, pgidErr := strconv.Atoi(fields[2])
+		if pidErr != nil || ppidErr != nil || pgidErr != nil {
+			continue
+		}
+		records = append(records, processRecord{pid: pid, ppid: ppid, pgid: pgid})
+	}
+	return records, nil
+}
+
+func descendantsOf(rootPID int, records []processRecord) []processRecord {
+	children := make(map[int][]processRecord)
+	for _, record := range records {
+		children[record.ppid] = append(children[record.ppid], record)
+	}
+	var descendants []processRecord
+	queue := []int{rootPID}
+	for len(queue) > 0 {
+		parent := queue[0]
+		queue = queue[1:]
+		for _, child := range children[parent] {
+			descendants = append(descendants, child)
+			queue = append(queue, child.pid)
+		}
+	}
+	return descendants
 }
 
 func (s *Session) cleanupFailedSpawn() error {

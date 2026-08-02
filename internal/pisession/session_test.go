@@ -40,6 +40,10 @@ func TestSessionBasicLifecycle(t *testing.T) {
 
 	assert.Equal(t, cfg.SessionID, session.ID())
 	assert.Positive(t, session.PID())
+	processGroup, err := syscall.Getpgid(session.PID())
+	require.NoError(t, err)
+	assert.Equal(t, session.PID(), processGroup)
+	assert.NotEqual(t, syscall.Getpgrp(), processGroup)
 	select {
 	case <-session.Done():
 		t.Fatal("session exited before use")
@@ -332,6 +336,67 @@ func TestSessionCloseEscalatesAfterGrace(t *testing.T) {
 	assert.Equal(t, syscall.SIGKILL, status.Signal())
 }
 
+func TestSessionForcedCloseKillsDetachedDescendants(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "detached.pid")
+	script := fmt.Sprintf(
+		`GIBSON_TEST_DETACHED_HELPER=1 GIBSON_TEST_DETACHED_PID_FILE=%q %q -test.run '^TestSessionDetachedProcessHelper$' & while [ ! -s %q ]; do sleep 0.01; done; printf '{"type":"ready"}\n'; trap '' TERM; while :; do sleep 0.01; done`,
+		pidFile,
+		os.Args[0],
+		pidFile,
+	)
+	session := startLifecycleProcess(t, script)
+	assert.Equal(t, "ready", receiveSessionEvent(t, session.Events()).Type)
+	detachedPID := readProcessID(t, pidFile)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, session.Close(ctx))
+	require.Eventually(t, func() bool {
+		return !processExists(detachedPID)
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestSessionReapsWhenDetachedDescendantHoldsStdout(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "stdout-holder.pid")
+	script := fmt.Sprintf(
+		`GIBSON_TEST_DETACHED_HELPER=1 GIBSON_TEST_DETACHED_PID_FILE=%q %q -test.run '^TestSessionDetachedProcessHelper$' & while [ ! -s %q ]; do sleep 0.01; done; printf '{"type":"final"}\n'; exit 7`,
+		pidFile,
+		os.Args[0],
+		pidFile,
+	)
+	session := startLifecycleProcess(t, script)
+	assert.Equal(t, "final", receiveSessionEvent(t, session.Events()).Type)
+	detachedPID := readProcessID(t, pidFile)
+	t.Cleanup(func() {
+		_ = signalProcessGroup(detachedPID, syscall.SIGKILL)
+	})
+
+	select {
+	case <-session.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not reap after parent exit")
+	}
+	for range session.Events() {
+	}
+	require.Error(t, session.ExitErr())
+}
+
+func TestSessionDetachedProcessHelper(t *testing.T) {
+	if os.Getenv("GIBSON_TEST_DETACHED_HELPER") != "1" {
+		return
+	}
+	if err := syscall.Setpgid(0, 0); err != nil {
+		os.Exit(2)
+	}
+	pidFile := os.Getenv("GIBSON_TEST_DETACHED_PID_FILE")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o600); err != nil {
+		os.Exit(3)
+	}
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+
 func TestSessionCloseEscalatesAndUnblocksFullEvents(t *testing.T) {
 	var script bytes.Buffer
 	script.WriteString(`trap '' TERM; i=0; while [ "$i" -lt 300 ]; do printf '{"type":"event","index":%s}\n' "$i"; i=$((i+1)); done; while :; do :; done`)
@@ -377,12 +442,15 @@ func startLifecycleProcess(t testing.TB, script string) *Session {
 	cmd := exec.Command("sh", "-c", script)
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
-	stdout, err := cmd.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	require.NoError(t, err)
+	cmd.Stdout = childStdout
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr.log"))
 	require.NoError(t, err)
 	cmd.Stderr = stderr
 	require.NoError(t, cmd.Start())
+	require.NoError(t, childStdout.Close())
 
 	logger := log.New(bytes.NewBuffer(nil))
 	session := &Session{
@@ -390,6 +458,7 @@ func startLifecycleProcess(t testing.TB, script string) *Session {
 		pid:              cmd.Process.Pid,
 		cmd:              cmd,
 		rpc:              newRPCClient(stdout, stdin, logger),
+		stdout:           stdout,
 		stderr:           stderr,
 		logger:           logger,
 		done:             make(chan struct{}),
@@ -405,6 +474,20 @@ func startLifecycleProcess(t testing.TB, script string) *Session {
 		_ = session.Close(ctx)
 	})
 	return session
+}
+
+func readProcessID(t testing.TB, path string) int {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var pid int
+	_, err = fmt.Sscanf(string(contents), "%d", &pid)
+	require.NoError(t, err)
+	return pid
+}
+
+func processExists(pid int) bool {
+	return syscall.Kill(pid, 0) == nil
 }
 
 func receiveSessionEvent(t testing.TB, events <-chan Event) Event {
