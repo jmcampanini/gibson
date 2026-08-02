@@ -263,8 +263,9 @@ field, so nothing goes stale on rename):
 - **Process ownership and shutdown:** pi runs in a dedicated process group so terminal
   Ctrl+C reaches Gibson without preempting RPC abort. Close signals that group with
   SIGTERM. Gibson tracks descendant ownership by PID plus a precise OS birth token,
-  stops discovery when the original pi identity disappears, refreshes mutable PGID
-  routing across detachment, and revalidates before every signal. Linux uses pidfds for
+  validates each new candidate's live ancestry chain, stops discovery when the original
+  pi identity disappears, refreshes mutable PGID routing across detachment, and
+  revalidates before every signal. Linux uses pidfds for
   individual signals when available. It signals a descendant group only with a current
   owned witness. After 5s, forced escalation freezes pi, takes a final descendant
   snapshot, and SIGKILLs owned descendants plus pi's group. The waiter reaps pi

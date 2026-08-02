@@ -219,8 +219,10 @@ Consumers therefore see `range Events()` end and can then read a fully-populated
 A lightweight process tracker snapshots pi descendants while pi is live and retains
 PID plus precise OS birth-token ownership identities after reparenting. Darwin uses the
 kernel start timeval; Linux uses `/proc` start ticks and pidfds for individual signals
-when supported. Discovery stops permanently when the original pi birth token disappears,
-so a recycled root PID cannot contribute descendants. PGID is mutable routing data: it
+when supported. Because Linux enumeration is per PID, each new candidate's complete
+PID/birth-token/PPID chain is re-read root-to-leaf before adoption, rejecting mixed-time
+snapshots. Discovery stops permanently when the original pi birth token disappears, so
+a recycled root PID cannot contribute descendants. PGID is mutable routing data: it
 is refreshed while PID/birth identity still matches and is not required for an individual
 kill. Every signal revalidates identity; whole-group signaling additionally requires a
 still-owned matching group leader or member of pi's extant original group. The reaper

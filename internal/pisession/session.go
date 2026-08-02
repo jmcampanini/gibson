@@ -516,10 +516,57 @@ func (t *ownedProcessTracker) capture() error {
 	}
 	if discover {
 		for _, record := range descendantsOf(t.root.pid, records) {
-			t.owned[record.pid] = record
+			validated, valid, err := t.validateDescendant(record, current)
+			if err != nil {
+				identityErr = errors.Join(identityErr, err)
+			}
+			if valid {
+				t.owned[validated.pid] = validated
+			}
 		}
 	}
 	return identityErr
+}
+
+func (t *ownedProcessTracker) validateDescendant(candidate processRecord, snapshot map[int]processRecord) (processRecord, bool, error) {
+	chain := []processRecord{candidate}
+	seen := map[int]bool{candidate.pid: true}
+	for parentPID := candidate.ppid; parentPID != t.root.pid; {
+		if seen[parentPID] {
+			return processRecord{}, false, nil
+		}
+		parent, exists := snapshot[parentPID]
+		if !exists {
+			return processRecord{}, false, nil
+		}
+		seen[parentPID] = true
+		chain = append(chain, parent)
+		parentPID = parent.ppid
+	}
+
+	liveRoot, exists, err := t.read(t.root.pid)
+	if err != nil {
+		return processRecord{}, false, err
+	}
+	if !exists || liveRoot.started != t.root.started {
+		return processRecord{}, false, nil
+	}
+	parentPID := t.root.pid
+	for index := len(chain) - 1; index >= 0; index-- {
+		expected := chain[index]
+		live, exists, err := t.read(expected.pid)
+		if err != nil {
+			return processRecord{}, false, err
+		}
+		if !exists || live.started != expected.started || live.ppid != parentPID {
+			return processRecord{}, false, nil
+		}
+		parentPID = live.pid
+		if index == 0 {
+			return live, true, nil
+		}
+	}
+	return processRecord{}, false, nil
 }
 
 func (t *ownedProcessTracker) signalRootProcessGroup(signal syscall.Signal) error {

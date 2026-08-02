@@ -368,6 +368,30 @@ func TestOwnedProcessTrackerRejectsReusedRootAndDescendantPIDs(t *testing.T) {
 	assert.NotContains(t, tracker.owned, 102)
 }
 
+func TestOwnedProcessTrackerRejectsMixedSnapshotAncestry(t *testing.T) {
+	snapshot := []processRecord{
+		{pid: 100, ppid: 1, pgid: 100, started: "root"},
+		{pid: 101, ppid: 100, pgid: 100, started: "parent-before-reuse"},
+		{pid: 102, ppid: 101, pgid: 101, started: "unrelated-child"},
+	}
+	live := map[int]processRecord{
+		100: {pid: 100, ppid: 1, pgid: 100, started: "root"},
+		101: {pid: 101, ppid: 200, pgid: 200, started: "parent-after-reuse"},
+		102: {pid: 102, ppid: 101, pgid: 101, started: "unrelated-child"},
+	}
+	list := func() ([]processRecord, error) {
+		return append([]processRecord(nil), snapshot...), nil
+	}
+	read := func(pid int) (processRecord, bool, error) {
+		record, exists := live[pid]
+		return record, exists, nil
+	}
+	tracker, err := newOwnedProcessTrackerWith(100, list, read)
+	require.NoError(t, err)
+	require.NoError(t, tracker.capture())
+	assert.Empty(t, tracker.owned)
+}
+
 func TestSessionForcedCloseKillsDetachedDescendants(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "detached.pid")
 	script := fmt.Sprintf(
