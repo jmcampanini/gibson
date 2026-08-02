@@ -44,7 +44,9 @@ Manager boundary):
     each entry's `id` itself with a minimal `{"id":...}` unmarshal, so it does not depend
     on M1 having parsed entries.
 - `internal/store`: `.gibson/` layout creation, `state.json` registry read-modify-write
-  (mutex + write-temp-then-rename, CONV §5), session id generation
+  (process-local serialization plus per-checkout cross-process locking,
+  reload-under-lock, and write-temp-then-rename replacement; CONV §5), session id
+  generation
   (`s-<YYYYMMDD>-<6 [a-z0-9]>` with collision regeneration), registry record shape per
   CONV §5. Assumed surface: `store.Open(checkoutPath)` returning a handle with
   `List() / Get(id) / Put(record)` and layout/log-path helpers.

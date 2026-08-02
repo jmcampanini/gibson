@@ -248,8 +248,13 @@ type Record struct {
 }
 ```
 
-Writes: in-process `sync.Mutex` + write-temp-then-`os.Rename` (atomic), full-file
-read-modify-write. What `run` writes, when:
+Final M1 writes use process-local serialization plus a per-checkout cross-process lock.
+Every full-file read-modify-write mutation reloads the latest registry while holding the
+lock and completes its write-temp-then-`os.Rename` replacement before unlocking. This
+prevents concurrent one-shot commands, or a command overlapping the later server, from
+losing records while preserving atomic snapshots for readers. Chunk 4 establishes the
+process-local and atomic-replacement shape; Chunk 6 completes the cross-process protocol.
+What `run` writes, when:
 
 1. at spawn: `Put(Record{status: live, pid, createdAt=lastActivityAt=now})`;
 2. on accepted prompt and on each `message_end`: `Touch(id, now)` — `message_end` is

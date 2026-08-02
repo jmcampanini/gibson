@@ -37,10 +37,11 @@ From **M1**:
   later minor or major version.
 - `internal/store`: `.gibson/` layout creation, `state.json` registry with the CONV §5
   schema (`version:1`, per-session `{id,name,type,status,createdAt,lastActivityAt,pid}`,
-  status `live|stopped|closed`), atomic write-temp-then-rename under an in-process
-  mutex, session id generation `s-<YYYYMMDD>-<6 [a-z0-9]>` with collision regeneration,
-  and `FindSessionFile(id)` locating a session's JSONL by its **header** id, never by
-  filename.
+  status `live|stopped|closed`), process-local serialization plus per-checkout
+  cross-process locking with reload-under-lock and atomic write-temp-then-rename
+  replacement, session id generation `s-<YYYYMMDD>-<6 [a-z0-9]>` with collision
+  regeneration, and `FindSessionFile(id)` locating a session's JSONL by its **header** id,
+  never by filename.
 - `internal/fakepi` + `internal/pitest` (`BuildFakePi(t)`) + `internal/testws`
   (`testws.New(t)`): fakepi answers `get_state/get_entries/get_session_stats/
   set_session_name/prompt/steer/follow_up/abort` and **writes a real v3 session JSONL**
