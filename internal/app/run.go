@@ -255,7 +255,7 @@ promptWait:
 		raw json.RawMessage
 		err error
 	}
-	// Pi marks a normal run streaming before it can process this follow-up command. A false result means the prompt was handled without a run; ordered stdout ensures any preceding events are already queued for the drain below.
+	// Verified pi marks a normal run streaming before it can process this follow-up command. Ordered stdout ensures events emitted before the state response are queued for the drain below.
 	stateResults := make(chan stateResult, 1)
 	go func() {
 		raw, err := session.GetState(ctx)
@@ -279,11 +279,13 @@ promptWait:
 				}
 				continue
 			default:
-				if agentStarted {
-					runErr := errors.Join(errors.New("pi became idle before agent_settled"), presenter.finishText())
-					return finisher.finish(RunCompleted, runErr)
+				if !agentStarted {
+					if !piVersion.Verified {
+						runErr := fmt.Errorf("cannot safely determine prompt completion with unverified pi %s: pi reported idle before agent_start", piVersion.Found)
+						return finisher.finish(RunCompleted, runErr)
+					}
+					return finisher.finish(RunCompleted, presenter.finishText())
 				}
-				return finisher.finish(RunCompleted, presenter.finishText())
 			}
 		}
 

@@ -186,6 +186,79 @@ func TestRunFinishesPromptHandledWithoutAgentRun(t *testing.T) {
 	}
 }
 
+func TestRunRejectsAmbiguousIdleStateFromUnverifiedPi(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	dependencies.checkPiVersion = func(context.Context, string) (pisession.VersionResult, error) {
+		return pisession.VersionResult{Found: "0.83.0", Verified: false}, nil
+	}
+	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+		return newScriptedRunSession(cfg, make(chan pisession.Event)), nil
+	}
+
+	outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "/handled"}, log.New(&bytes.Buffer{}), dependencies)
+
+	require.Error(t, err)
+	assert.Equal(t, RunCompleted, outcome)
+	assert.Contains(t, err.Error(), "cannot safely determine prompt completion with unverified pi 0.83.0")
+	registry := readRunRegistry(t, ws.Checkout)
+	for _, record := range registry.Sessions {
+		assert.Equal(t, store.StatusStopped, record.Status)
+		assert.Zero(t, record.PID)
+	}
+}
+
+func TestRunWaitsForAgentSettledAfterPiReportsIdle(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	stateObserved := make(chan struct{})
+	events := make(chan pisession.Event, 1)
+	events <- runEvent("agent_start", `{"type":"agent_start"}`)
+	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+		session := newScriptedRunSession(cfg, events)
+		stateCalls := 0
+		session.getState = func() (json.RawMessage, error) {
+			stateCalls++
+			if stateCalls == 2 {
+				close(stateObserved)
+			}
+			return session.state, nil
+		}
+		return session, nil
+	}
+	type runResult struct {
+		outcome RunOutcome
+		err     error
+	}
+	result := make(chan runResult, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "start"}, log.New(&bytes.Buffer{}), dependencies)
+		result <- runResult{outcome: outcome, err: err}
+	}()
+
+	select {
+	case <-stateObserved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not check post-prompt state")
+	}
+	select {
+	case got := <-result:
+		t.Fatalf("run returned before agent_settled: outcome=%v err=%v", got.outcome, got.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	events <- runEvent("agent_settled", `{"type":"agent_settled"}`)
+
+	select {
+	case got := <-result:
+		require.NoError(t, got.err)
+		assert.Equal(t, RunCompleted, got.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not finish after agent_settled")
+	}
+}
+
 func TestRunAllowsAgentStartAfterPromptAcceptance(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
