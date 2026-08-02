@@ -27,27 +27,36 @@ var (
 )
 
 type rpcClient struct {
-	reader         io.Reader
-	writer         io.WriteCloser
-	logger         *log.Logger
-	commandTimeout time.Duration
-	events         chan Event
-	writes         chan writeRequest
-	closing        chan struct{}
-	pumpDone       chan struct{}
-	writerDone     chan struct{}
-	closeOnce      sync.Once
-	nextID         atomic.Uint64
-	pendingMu      sync.Mutex
-	pending        map[string]chan responseResult
-	writerErrMu    sync.Mutex
-	writerErr      error
+	reader          io.Reader
+	writer          io.WriteCloser
+	logger          *log.Logger
+	commandTimeout  time.Duration
+	events          chan Event
+	writes          chan writeRequest
+	closing         chan struct{}
+	pumpDone        chan struct{}
+	writerDone      chan struct{}
+	closeOnce       sync.Once
+	writerCloseOnce sync.Once
+	nextID          atomic.Uint64
+	pendingMu       sync.Mutex
+	pending         map[string]chan responseResult
+	writerErrMu     sync.Mutex
+	writerErr       error
 }
 
 type writeRequest struct {
 	value  any
 	result chan error
+	done   chan struct{}
 }
+
+type responseWaitPolicy uint8
+
+const (
+	boundedResponseWait responseWaitPolicy = iota
+	unboundedResponseWait
+)
 
 type responseResult struct {
 	raw json.RawMessage
@@ -92,6 +101,14 @@ func newRPCClient(reader io.Reader, writer io.WriteCloser, logger *log.Logger) *
 }
 
 func (c *rpcClient) command(ctx context.Context, command string, fields map[string]any) (json.RawMessage, error) {
+	return c.commandWithPolicy(ctx, command, fields, boundedResponseWait)
+}
+
+func (c *rpcClient) commandWithPolicy(ctx context.Context, command string, fields map[string]any, policy responseWaitPolicy) (json.RawMessage, error) {
+	return c.commandWithWritePolicy(ctx, command, fields, policy, nil)
+}
+
+func (c *rpcClient) commandWithWritePolicy(ctx context.Context, command string, fields map[string]any, policy responseWaitPolicy, written chan<- struct{}) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -110,40 +127,51 @@ func (c *rpcClient) command(ctx context.Context, command string, fields map[stri
 	}
 	defer c.removePending(id, response)
 
-	var timeout <-chan time.Time
-	if command != "prompt" {
-		timer := time.NewTimer(c.commandTimeout)
-		defer timer.Stop()
-		timeout = timer.C
-	}
 	timeoutErr := fmt.Errorf("%w: command %q (%s)", ErrCommandTimeout, command, id)
+	deadline := time.Now().Add(c.commandTimeout)
+	request := writeRequest{value: payload, result: make(chan error, 1), done: make(chan struct{})}
+	writeTimer := c.startWriteTimer(request.done, timeoutErr)
 
-	request := writeRequest{value: payload, result: make(chan error, 1)}
 	select {
 	case c.writes <- request:
 	case <-ctx.Done():
+		writeTimer.Stop()
 		return nil, ctx.Err()
-	case <-timeout:
-		return nil, timeoutErr
 	case <-c.closing:
-		return nil, errRPCClosing
+		writeTimer.Stop()
+		return nil, c.transportFailure()
 	case <-c.writerDone:
-		return nil, c.writerFailure()
+		writeTimer.Stop()
+		return nil, c.transportFailure()
 	}
 
 	select {
 	case err := <-request.result:
+		writeTimer.Stop()
 		if err != nil {
 			return nil, fmt.Errorf("write pi RPC command %q: %w", command, err)
 		}
+		if written != nil {
+			close(written)
+		}
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-timeout:
-		return nil, timeoutErr
 	case <-c.closing:
-		return nil, errRPCClosing
+		return nil, c.transportFailure()
 	case <-c.writerDone:
-		return nil, c.writerFailure()
+		return nil, c.transportFailure()
+	}
+
+	var timeout <-chan time.Time
+	var responseTimer *time.Timer
+	if policy == boundedResponseWait {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, timeoutErr
+		}
+		responseTimer = time.NewTimer(remaining)
+		defer responseTimer.Stop()
+		timeout = responseTimer.C
 	}
 
 	var result responseResult
@@ -154,9 +182,9 @@ func (c *rpcClient) command(ctx context.Context, command string, fields map[stri
 	case <-timeout:
 		return nil, timeoutErr
 	case <-c.closing:
-		return nil, errRPCClosing
+		return nil, c.transportFailure()
 	case <-c.writerDone:
-		return nil, c.writerFailure()
+		return nil, c.transportFailure()
 	}
 	if result.err != nil {
 		return nil, result.err
@@ -177,32 +205,49 @@ func (c *rpcClient) command(ctx context.Context, command string, fields map[stri
 }
 
 func (c *rpcClient) write(value any) error {
-	request := writeRequest{value: value, result: make(chan error, 1)}
+	timeoutErr := fmt.Errorf("%w: RPC record write", ErrCommandTimeout)
+	request := writeRequest{value: value, result: make(chan error, 1), done: make(chan struct{})}
+	writeTimer := c.startWriteTimer(request.done, timeoutErr)
+
 	select {
 	case c.writes <- request:
 	case <-c.closing:
-		return errRPCClosing
+		writeTimer.Stop()
+		return c.transportFailure()
 	case <-c.writerDone:
-		return c.writerFailure()
+		writeTimer.Stop()
+		return c.transportFailure()
 	}
 
 	select {
 	case err := <-request.result:
+		writeTimer.Stop()
 		if err != nil {
 			return fmt.Errorf("write pi RPC record: %w", err)
 		}
 		return nil
 	case <-c.closing:
-		return errRPCClosing
+		return c.transportFailure()
 	case <-c.writerDone:
-		return c.writerFailure()
+		return c.transportFailure()
 	}
+}
+
+func (c *rpcClient) startWriteTimer(done <-chan struct{}, timeoutErr error) *time.Timer {
+	return time.AfterFunc(c.commandTimeout, func() {
+		select {
+		case <-done:
+			return
+		default:
+			c.fail(timeoutErr)
+		}
+	})
 }
 
 func (c *rpcClient) addPending(id string, response chan responseResult) error {
 	select {
 	case <-c.closing:
-		return errRPCClosing
+		return c.transportFailure()
 	default:
 	}
 
@@ -210,7 +255,7 @@ func (c *rpcClient) addPending(id string, response chan responseResult) error {
 	defer c.pendingMu.Unlock()
 	select {
 	case <-c.closing:
-		return errRPCClosing
+		return c.transportFailure()
 	default:
 		c.pending[id] = response
 		return nil
@@ -230,36 +275,31 @@ func (c *rpcClient) runWriter() {
 	for {
 		select {
 		case <-c.closing:
-			c.setWriterFailure(errRPCClosing)
-			return
-		default:
-		}
-
-		select {
-		case <-c.closing:
-			c.setWriterFailure(errRPCClosing)
 			return
 		case request := <-c.writes:
 			select {
 			case <-c.closing:
-				request.result <- errRPCClosing
-				c.setWriterFailure(errRPCClosing)
+				close(request.done)
+				request.result <- c.transportFailure()
 				return
 			default:
 			}
 
 			encoded, err := json.Marshal(request.value)
 			if err != nil {
+				close(request.done)
 				request.result <- fmt.Errorf("encode pi RPC record: %w", err)
 				continue
 			}
 			encoded = append(encoded, '\n')
 			err = writeAll(c.writer, encoded)
-			request.result <- err
+			close(request.done)
 			if err != nil {
-				c.setWriterFailure(fmt.Errorf("write pi RPC record: %w", err))
+				c.fail(fmt.Errorf("write pi RPC record: %w", err))
+				request.result <- c.transportFailure()
 				return
 			}
+			request.result <- nil
 		}
 	}
 }
@@ -295,6 +335,10 @@ func (c *rpcClient) writerFailure() error {
 		return errRPCWriterStopped
 	}
 	return c.writerErr
+}
+
+func (c *rpcClient) transportFailure() error {
+	return c.writerFailure()
 }
 
 func (c *rpcClient) runPump() {
@@ -368,7 +412,24 @@ func (c *rpcClient) failPending(err error) {
 }
 
 func (c *rpcClient) close() {
+	c.stop(errRPCClosing)
+}
+
+func (c *rpcClient) stop(err error) {
 	c.closeOnce.Do(func() {
+		c.setWriterFailure(err)
 		close(c.closing)
+		c.failPending(err)
+	})
+}
+
+func (c *rpcClient) fail(err error) {
+	c.stop(err)
+	c.closeWriter()
+}
+
+func (c *rpcClient) closeWriter() {
+	c.writerCloseOnce.Do(func() {
+		_ = c.writer.Close()
 	})
 }

@@ -23,6 +23,7 @@ type rpcRecord struct {
 	Command               string          `json:"command"`
 	Success               bool            `json:"success"`
 	Data                  json.RawMessage `json:"data"`
+	Message               rpcMessage      `json:"message"`
 	Messages              []rpcMessage    `json:"messages"`
 	AssistantMessageEvent struct {
 		Type  string `json:"type"`
@@ -31,8 +32,9 @@ type rpcRecord struct {
 }
 
 type rpcMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
+	Role       string `json:"role"`
+	Content    any    `json:"content"`
+	StopReason string `json:"stopReason"`
 }
 
 func TestFakePiBasicSession(t *testing.T) {
@@ -139,6 +141,148 @@ func TestFakePiBasicSession(t *testing.T) {
 	assertSessionChain(t, stateData.SessionFile, cwd)
 }
 
+func TestFakePiSlowStreamAbortIsDurableAndSettlesBeforeResponse(t *testing.T) {
+	pi := BuildFakePi(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cwd := t.TempDir()
+	sessionDir := filepath.Join(cwd, "sessions")
+	cmd := exec.CommandContext(ctx, pi,
+		"--mode", "rpc",
+		"--session-id", "s-20260727-abort1",
+		"--session-dir", sessionDir,
+	)
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "FAKEPI_SCENARIO=slow_stream")
+	stdin, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+
+	encoder := json.NewEncoder(stdin)
+	decoder := json.NewDecoder(stdout)
+	require.NoError(t, encoder.Encode(map[string]any{"id": "ready", "type": "get_state"}))
+	state := decodeRecord(t, decoder)
+	var stateData struct {
+		SessionFile string `json:"sessionFile"`
+	}
+	require.NoError(t, json.Unmarshal(state.Data, &stateData))
+
+	require.NoError(t, encoder.Encode(map[string]any{"id": "prompt", "type": "prompt", "message": "stop this"}))
+	require.True(t, decodeRecord(t, decoder).Success)
+
+	var streamed string
+	for streamed == "" {
+		event := decodeRecord(t, decoder)
+		if event.Type == "message_update" {
+			streamed += event.AssistantMessageEvent.Delta
+		}
+	}
+	require.NoError(t, encoder.Encode(map[string]any{"id": "abort", "type": "abort"}))
+
+	var afterAbort []string
+	var final rpcMessage
+	settled := false
+	for {
+		record := decodeRecord(t, decoder)
+		if record.Type == "response" {
+			assert.Equal(t, "abort", record.ID)
+			assert.Equal(t, "abort", record.Command)
+			assert.True(t, record.Success)
+			assert.True(t, settled)
+			break
+		}
+		afterAbort = append(afterAbort, record.Type)
+		if record.Type == "message_update" {
+			streamed += record.AssistantMessageEvent.Delta
+		}
+		if record.Type == "message_end" {
+			final = record.Message
+		}
+		if record.Type == "agent_settled" {
+			settled = true
+		}
+	}
+	require.GreaterOrEqual(t, len(afterAbort), 3)
+	assert.Equal(t, []string{"message_end", "agent_end", "agent_settled"}, afterAbort[len(afterAbort)-3:])
+	endIndex := len(afterAbort) - 3
+	assert.NotContains(t, afterAbort[endIndex+1:], "message_update")
+	assert.Equal(t, "aborted", final.StopReason)
+	assert.Equal(t, streamed, messageText(t, final.Content))
+
+	require.NoError(t, stdin.Close())
+	require.NoError(t, cmd.Wait(), stderr.String())
+	assertAbortedSession(t, stateData.SessionFile, streamed)
+}
+
+func TestFakePiCrashMidStreamExitsOneWithReadableSession(t *testing.T) {
+	pi := BuildFakePi(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cwd := t.TempDir()
+	sessionDir := filepath.Join(cwd, "sessions")
+	cmd := exec.CommandContext(ctx, pi,
+		"--mode", "rpc",
+		"--session-id", "s-20260727-crash1",
+		"--session-dir", sessionDir,
+	)
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "FAKEPI_SCENARIO=crash_mid_stream")
+	stdin, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+
+	encoder := json.NewEncoder(stdin)
+	decoder := json.NewDecoder(stdout)
+	require.NoError(t, encoder.Encode(map[string]any{"id": "ready", "type": "get_state"}))
+	state := decodeRecord(t, decoder)
+	var stateData struct {
+		SessionFile string `json:"sessionFile"`
+	}
+	require.NoError(t, json.Unmarshal(state.Data, &stateData))
+	require.NoError(t, encoder.Encode(map[string]any{"id": "prompt", "type": "prompt", "message": "crash now"}))
+	require.True(t, decodeRecord(t, decoder).Success)
+
+	var eventTypes []string
+	for {
+		event := decodeRecord(t, decoder)
+		eventTypes = append(eventTypes, event.Type)
+		if event.Type == "message_update" {
+			assert.NotEmpty(t, event.AssistantMessageEvent.Delta)
+			break
+		}
+	}
+
+	err = cmd.Wait()
+	var exitError *exec.ExitError
+	require.ErrorAs(t, err, &exitError, stderr.String())
+	assert.Equal(t, 1, exitError.ExitCode())
+	assert.Contains(t, stderr.String(), "fakepi: scenario crash_mid_stream: deterministic crash after first delta")
+	assert.NotContains(t, eventTypes, "agent_settled")
+	assertReadableSession(t, stateData.SessionFile, 2)
+}
+
 func TestFakePiExits143OnSIGTERM(t *testing.T) {
 	pi := BuildFakePi(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -174,6 +318,75 @@ func TestFakePiExits143OnSIGTERM(t *testing.T) {
 	var exitError *exec.ExitError
 	require.ErrorAs(t, err, &exitError, stderr.String())
 	assert.Equal(t, 143, exitError.ExitCode())
+}
+
+func messageText(t testing.TB, content any) string {
+	t.Helper()
+	encoded, err := json.Marshal(content)
+	require.NoError(t, err)
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	require.NoError(t, json.Unmarshal(encoded, &parts))
+	var text string
+	for _, part := range parts {
+		if part.Type == "text" {
+			text += part.Text
+		}
+	}
+	return text
+}
+
+func assertAbortedSession(t testing.TB, path, text string) {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	scanner := bufio.NewScanner(bytes.NewReader(contents))
+	var assistant struct {
+		Role       string `json:"role"`
+		Content    any    `json:"content"`
+		StopReason string `json:"stopReason"`
+	}
+	for scanner.Scan() {
+		var record struct {
+			Message json.RawMessage `json:"message"`
+		}
+		require.NoError(t, json.Unmarshal(scanner.Bytes(), &record))
+		if len(record.Message) == 0 {
+			continue
+		}
+		var candidate struct {
+			Role       string `json:"role"`
+			Content    any    `json:"content"`
+			StopReason string `json:"stopReason"`
+		}
+		require.NoError(t, json.Unmarshal(record.Message, &candidate))
+		if candidate.Role == "assistant" {
+			assistant = candidate
+		}
+	}
+	require.NoError(t, scanner.Err())
+	assert.Equal(t, "assistant", assistant.Role)
+	assert.Equal(t, "aborted", assistant.StopReason)
+	assert.Equal(t, text, messageText(t, assistant.Content))
+}
+
+func assertReadableSession(t testing.TB, path string, minimumRecords int) {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	records := 0
+	scanner := bufio.NewScanner(bytes.NewReader(contents))
+	for scanner.Scan() {
+		var record map[string]any
+		require.NoError(t, json.Unmarshal(scanner.Bytes(), &record))
+		records++
+	}
+	require.NoError(t, scanner.Err())
+	assert.GreaterOrEqual(t, records, minimumRecords)
 }
 
 func decodeRecord(t testing.TB, decoder *json.Decoder) rpcRecord {

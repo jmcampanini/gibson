@@ -110,12 +110,14 @@ JSON object + `\n`.
 - Every command gets `id: "c-<n>"` from a per-process atomic counter. A mutex-guarded
   `map[string]chan json.RawMessage` resolves replies. Per rpc.md, pi echoes `id` on the
   matching `{"type":"response","command":...,"success":...}` line.
-- Default timeout 30s per command (tighter caller ctx wins): on timeout the id is removed
-  from the map and `ErrCommandTimeout` returned; a late response then arrives unmatched
-  and is logged + dropped. The `prompt` command family temporarily remains pending until
-  caller cancellation, process exit, transport closure, or a response so pre-acceptance
-  extension dialogs can wait as required; D-017 owns the final write/response timeout
-  split and cross-milestone contract.
+- Every outbound write has a 30s bound. Ordinary commands use one 30s budget across
+  enqueue, write, and response (a tighter caller context wins): on a response timeout the
+  id is removed, `ErrCommandTimeout` is returned, and a late response is logged and
+  dropped. Prompt submission keeps the write bound but its response remains pending until
+  caller cancellation, process exit, transport closure, or acceptance so pre-acceptance
+  extension dialogs can wait. A write timeout is fatal to the transport and fails every
+  pending command. The session method selects this policy; D-017 owns its conventions,
+  upstream-disposition, and M2 plan-gate reconciliation.
 - `success:false` responses resolve the waiter with an error wrapping pi's `error` string.
   rpc.md note: pi parse errors come back as `{"type":"response","command":"parse",
   "success":false,...}` with no id — unmatched, logged at error level (it indicates a
@@ -447,6 +449,9 @@ here so later plans may rely on them):
 - `pisession.Session` methods:
   - `Prompt(ctx, message, behavior string) error` (`behavior` ∈ `""|"steer"|"followUp"`,
     maps to `streamingBehavior`)
+  - `StartPrompt(ctx, message, behavior string) (<-chan error, error)` writes the same
+    prompt before returning its buffered acceptance-result channel, so signal handling can
+    order `abort` after prompt submission while continuing to drain events
   - `Abort(ctx) error`
   - `GetState(ctx) (json.RawMessage, error)` (response `data` verbatim)
   - `GetEntries(ctx, since string) (entries []json.RawMessage, leafID string, err error)`
@@ -621,7 +626,8 @@ All steps passing is the M1 done signal.
       `get_entries` (`since` cursor; invalid → `ErrInvalidCursor`),
       `get_session_stats`, `set_session_name` all implemented per rpc.md.
 - [ ] Conventions §6 — spawn sequence (spawn → `get_state` probe → prompt), command ids
-      `c-<n>` with 30s timeout, single-goroutine writes, `ReadBytes` pump, shutdown
+      `c-<n>`, bounded writes, one 30s ordinary-command budget, unbounded prompt-response
+      waiting, single-goroutine writes, `ReadBytes` pump, and shutdown
       SIGTERM→5s→SIGKILL.
 - [ ] Conventions §7 — `pisession.Session` exports exactly the pinned method set (plus
       the M1-added names in §6 above).

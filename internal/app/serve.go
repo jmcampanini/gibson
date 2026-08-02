@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -42,6 +43,8 @@ type serveDependencies struct {
 }
 
 func Serve(ctx context.Context, options ServeOptions, logger *log.Logger) error {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
 	return serve(ctx, options, logger, serveDependencies{
 		assets:         web.Dist,
 		getwd:          os.Getwd,

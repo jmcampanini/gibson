@@ -30,6 +30,12 @@ func TestProcessExitCode(t *testing.T) {
 			outcome: app.RunInterrupted,
 			code:    130,
 		},
+		"interrupted with cleanup diagnostics": {
+			outcome: app.RunInterrupted,
+			err:     errors.New("registry cleanup failed"),
+			code:    130,
+			stderr:  "gibson: error: registry cleanup failed\n",
+		},
 	}
 
 	for name, test := range tests {

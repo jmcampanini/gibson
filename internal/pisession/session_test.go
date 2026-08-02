@@ -1,14 +1,21 @@
 package pisession
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"charm.land/log/v2"
 
 	"github.com/jmcampanini/gibson/internal/pitest"
 	"github.com/stretchr/testify/assert"
@@ -118,6 +125,53 @@ func TestSessionBasicLifecycle(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestSessionStartPromptReturnsAfterWriteBeforeAcceptance(t *testing.T) {
+	piOutput, writePiOutput := io.Pipe()
+	readCommands, piInput := io.Pipe()
+	client := newRPCClient(piOutput, piInput, nil)
+	client.commandTimeout = time.Second
+	session := &Session{rpc: client}
+	releaseResponse := make(chan struct{})
+	peerResult := make(chan error, 1)
+	go func() {
+		defer closePeer(readCommands, writePiOutput)
+		line, err := bufio.NewReader(readCommands).ReadBytes('\n')
+		if err != nil {
+			peerResult <- err
+			return
+		}
+		var command struct {
+			ID   string `json:"id"`
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(line, &command); err != nil {
+			peerResult <- err
+			return
+		}
+		if command.Type != "prompt" {
+			peerResult <- fmt.Errorf("expected prompt, got %q", command.Type)
+			return
+		}
+		<-releaseResponse
+		peerResult <- writeJSONLine(writePiOutput, map[string]any{
+			"id": command.ID, "type": "response", "command": "prompt", "success": true,
+		})
+	}()
+
+	acceptance, err := session.StartPrompt(context.Background(), "hello", "")
+	require.NoError(t, err)
+	select {
+	case err := <-acceptance:
+		t.Fatalf("prompt acceptance resolved before peer response: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseResponse)
+	require.NoError(t, <-acceptance)
+	require.NoError(t, <-peerResult)
+	waitFor(t, client.pumpDone, "RPC pump")
+	stopRPC(t, client)
+}
+
 func TestSessionTypedCommands(t *testing.T) {
 	cfg := newSessionTestConfig(t, "s-20260728-typed1")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -179,6 +233,128 @@ func TestSessionTypedCommands(t *testing.T) {
 	require.NoError(t, session.Close(ctx))
 }
 
+func TestSessionAbortSlowStream(t *testing.T) {
+	t.Setenv("FAKEPI_SCENARIO", "slow_stream")
+	cfg := newSessionTestConfig(t, "s-20260802-abort1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	session, err := Spawn(ctx, cfg)
+	require.NoError(t, err)
+	cleanupSession(t, session)
+	require.NoError(t, session.Prompt(ctx, "Start slowly", ""))
+
+	for receiveSessionEvent(t, session.Events()).Type != "message_update" {
+	}
+	require.NoError(t, session.Abort(ctx))
+	for receiveSessionEvent(t, session.Events()).Type != "agent_settled" {
+	}
+
+	entries, _, err := session.GetEntries(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	var assistant struct {
+		Message struct {
+			StopReason string `json:"stopReason"`
+		} `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(entries[1], &assistant))
+	assert.Equal(t, "aborted", assistant.Message.StopReason)
+}
+
+func TestSessionCrashFailsPendingAndCompletesInOrder(t *testing.T) {
+	session := startLifecycleProcess(t, `printf '{"type":"message_update","delta":"partial"}\n'; IFS= read -r line; echo 'crash diagnostic' >&2; exit 7`)
+	result := make(chan error, 1)
+	go func() {
+		_, err := session.GetState(context.Background())
+		result <- err
+	}()
+
+	require.ErrorIs(t, <-result, ErrProcessExited)
+	var events []Event
+	for event := range session.Events() {
+		events = append(events, event)
+	}
+	require.Len(t, events, 1)
+	assert.Equal(t, "message_update", events[0].Type)
+	select {
+	case <-session.Done():
+	default:
+		t.Fatal("events closed before Done")
+	}
+	require.Error(t, session.ExitErr())
+	_, err := session.stderr.Stat()
+	require.Error(t, err)
+	stderr, err := os.ReadFile(session.stderr.Name())
+	require.NoError(t, err)
+	assert.Contains(t, string(stderr), "crash diagnostic")
+}
+
+func TestSessionCloseIsConcurrentAndIdempotent(t *testing.T) {
+	session := startLifecycleProcess(t, `trap 'exit 0' TERM; printf '{"type":"ready"}\n'; while :; do sleep 0.01; done`)
+	assert.Equal(t, "ready", receiveSessionEvent(t, session.Events()).Type)
+
+	const callers = 24
+	errs := make(chan error, callers)
+	var start sync.WaitGroup
+	start.Add(1)
+	for range callers {
+		go func() {
+			start.Wait()
+			errs <- session.Close(context.Background())
+		}()
+	}
+	start.Done()
+	for range callers {
+		require.NoError(t, <-errs)
+	}
+	require.NoError(t, session.Close(context.Background()))
+	select {
+	case <-session.Done():
+	default:
+		t.Fatal("concurrent Close returned before reap")
+	}
+}
+
+func TestSessionCloseEscalatesAfterGrace(t *testing.T) {
+	session := startLifecycleProcess(t, `trap '' TERM; printf '{"type":"ready"}\n'; while :; do :; done`)
+	session.shutdownGrace = 30 * time.Millisecond
+	assert.Equal(t, "ready", receiveSessionEvent(t, session.Events()).Type)
+
+	started := time.Now()
+	require.NoError(t, session.Close(context.Background()))
+	assert.GreaterOrEqual(t, time.Since(started), 20*time.Millisecond)
+	assert.Less(t, time.Since(started), time.Second)
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, session.ExitErr(), &exitErr)
+	status := exitErr.Sys().(syscall.WaitStatus)
+	assert.True(t, status.Signaled())
+	assert.Equal(t, syscall.SIGKILL, status.Signal())
+}
+
+func TestSessionCloseEscalatesAndUnblocksFullEvents(t *testing.T) {
+	var script bytes.Buffer
+	script.WriteString(`trap '' TERM; i=0; while [ "$i" -lt 300 ]; do printf '{"type":"event","index":%s}\n' "$i"; i=$((i+1)); done; while :; do :; done`)
+	session := startLifecycleProcess(t, script.String())
+	session.shutdownGrace = 30 * time.Millisecond
+	require.Eventually(t, func() bool {
+		return len(session.rpc.events) == eventBufferSize
+	}, 5*time.Second, time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	require.NoError(t, session.Close(ctx))
+	assert.Less(t, time.Since(started), time.Second)
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, session.ExitErr(), &exitErr)
+	status := exitErr.Sys().(syscall.WaitStatus)
+	assert.True(t, status.Signaled())
+	assert.Equal(t, syscall.SIGKILL, status.Signal())
+	for range session.Events() {
+	}
+}
+
 func TestSpawnCleansUpAfterReadinessFailure(t *testing.T) {
 	t.Setenv("FAKEPI_SCENARIO", "missing-scenario")
 	cfg := newSessionTestConfig(t, "s-20260728-failed")
@@ -194,6 +370,41 @@ func TestSpawnCleansUpAfterReadinessFailure(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.Contains(t, string(stderr), `unsupported FAKEPI_SCENARIO "missing-scenario"`)
 	require.NoError(t, os.Remove(cfg.StderrPath))
+}
+
+func startLifecycleProcess(t testing.TB, script string) *Session {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", script)
+	stdin, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr.log"))
+	require.NoError(t, err)
+	cmd.Stderr = stderr
+	require.NoError(t, cmd.Start())
+
+	logger := log.New(bytes.NewBuffer(nil))
+	session := &Session{
+		id:               "lifecycle-test",
+		pid:              cmd.Process.Pid,
+		cmd:              cmd,
+		rpc:              newRPCClient(stdout, stdin, logger),
+		stderr:           stderr,
+		logger:           logger,
+		done:             make(chan struct{}),
+		complete:         make(chan struct{}),
+		shutdownDone:     make(chan struct{}),
+		shutdownEscalate: make(chan struct{}),
+		shutdownGrace:    200 * time.Millisecond,
+	}
+	go session.reap()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_ = session.Close(ctx)
+	})
+	return session
 }
 
 func receiveSessionEvent(t testing.TB, events <-chan Event) Event {

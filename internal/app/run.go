@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -19,7 +20,10 @@ import (
 	"github.com/jmcampanini/gibson/internal/workspace"
 )
 
-const runCleanupTimeout = 5 * time.Second
+const (
+	runCleanupTimeout = 5 * time.Second
+	crashTailSize     = 8 << 10
+)
 
 type RunOutcome uint8
 
@@ -36,7 +40,8 @@ type RunOptions struct {
 }
 
 type runSession interface {
-	Prompt(context.Context, string, string) error
+	StartPrompt(context.Context, string, string) (<-chan error, error)
+	Abort(context.Context) error
 	GetState(context.Context) (json.RawMessage, error)
 	Events() <-chan pisession.Event
 	Close(context.Context) error
@@ -50,9 +55,13 @@ type runDependencies struct {
 	checkPiVersion func(context.Context, string) (pisession.VersionResult, error)
 	spawn          func(context.Context, pisession.Config) (runSession, error)
 	now            func() time.Time
+	interrupts     <-chan os.Signal
 }
 
 func Run(ctx context.Context, options RunOptions, logger *log.Logger) (RunOutcome, error) {
+	interrupts := make(chan os.Signal, 2)
+	signal.Notify(interrupts, os.Interrupt)
+	defer signal.Stop(interrupts)
 	return run(ctx, options, logger, runDependencies{
 		getwd:          os.Getwd,
 		resolvePiBin:   pisession.ResolvePiBin,
@@ -60,7 +69,8 @@ func Run(ctx context.Context, options RunOptions, logger *log.Logger) (RunOutcom
 		spawn: func(ctx context.Context, cfg pisession.Config) (runSession, error) {
 			return pisession.Spawn(ctx, cfg)
 		},
-		now: time.Now,
+		now:        time.Now,
+		interrupts: interrupts,
 	})
 }
 
@@ -144,7 +154,7 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		LastActivityAt: startedAt.Format(time.RFC3339),
 		PID:            session.PID(),
 	}); err != nil {
-		closeErr := closeRunSession(session)
+		closeErr := closeRunSession(session, false, nil)
 		return RunCompleted, errors.Join(fmt.Errorf("record live session: %w", err), closeErr)
 	}
 	finisher := runFinisher{
@@ -153,6 +163,7 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		stderr:    stderr,
 		sessionID: sessionID,
 		logPath:   logPath,
+		logger:    logger,
 	}
 
 	stateRaw, err := session.GetState(ctx)
@@ -194,23 +205,119 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		}
 		return event.Type == "agent_settled", nil
 	}
-	finishAfterEvent := func(event pisession.Event) (bool, error) {
-		settled, eventErr := processEvent(event)
-		if eventErr != nil {
-			return false, errors.Join(eventErr, presenter.finishText())
+
+	interrupt := runInterruptState{}
+	interrupts := dependencies.interrupts
+	finishInterrupted := func(force bool, runErr error) (RunOutcome, error) {
+		runErr = errors.Join(runErr, interrupt.err, presenter.finalAssistantErr, presenter.finishText())
+		if force {
+			return finisher.finishForced(RunInterrupted, runErr)
 		}
-		if settled {
-			return true, errors.Join(presenter.finalAssistantErr, presenter.finishText())
+		return finisher.finishInterrupt(RunInterrupted, runErr, dependencies.interrupts)
+	}
+	handleInterrupt := func() (bool, RunOutcome, error) {
+		if interrupt.started {
+			outcome, err := finishInterrupted(true, nil)
+			return true, outcome, err
 		}
-		return false, nil
+		interrupt.start(session, &presenter)
+		return false, RunCompleted, nil
+	}
+	handleAbortResult := func(err error) (bool, RunOutcome, error) {
+		interrupt.complete = true
+		interrupt.results = nil
+		if err != nil {
+			interrupt.err = fmt.Errorf("abort pi: %w", err)
+			outcome, finishErr := finishInterrupted(false, nil)
+			return true, outcome, finishErr
+		}
+		if interrupt.settled {
+			outcome, finishErr := finishInterrupted(false, nil)
+			return true, outcome, finishErr
+		}
+		return false, RunCompleted, nil
+	}
+	handleEvent := func(event pisession.Event) (bool, error) {
+		settled, err := processEvent(event)
+		if event.Type == "agent_start" {
+			interrupt.agentStarted = true
+		}
+		interrupt.settled = interrupt.settled || settled
+		return settled, err
+	}
+	finishEventError := func(eventErr error) (RunOutcome, error) {
+		runErr := errors.Join(eventErr, presenter.finishText())
+		if interrupt.started {
+			return finishInterrupted(false, runErr)
+		}
+		return finisher.finish(RunCompleted, runErr)
+	}
+	finishNormalWithInterruptPriority := func(runErr func() error) (bool, RunOutcome, error) {
+		select {
+		case <-interrupts:
+			return handleInterrupt()
+		default:
+			outcome, err := finisher.finish(RunCompleted, runErr())
+			return true, outcome, err
+		}
+	}
+	finishSettled := func() (bool, RunOutcome, error) {
+		if interrupt.started {
+			if !interrupt.complete {
+				return false, RunCompleted, nil
+			}
+			outcome, err := finishInterrupted(false, nil)
+			return true, outcome, err
+		}
+		return finishNormalWithInterruptPriority(func() error {
+			return errors.Join(presenter.finalAssistantErr, presenter.finishText())
+		})
+	}
+	type promptStartResult struct {
+		acceptance <-chan error
+		err        error
+	}
+	promptStarts := make(chan promptStartResult, 1)
+	go func() {
+		acceptance, err := session.StartPrompt(ctx, options.Message, "")
+		promptStarts <- promptStartResult{acceptance: acceptance, err: err}
+	}()
+	var promptResults <-chan error
+	interruptBeforePrompt := false
+	for promptResults == nil {
+		select {
+		case <-ctx.Done():
+			return finisher.finish(RunInterrupted, presenter.finishText())
+		case <-interrupts:
+			if interruptBeforePrompt {
+				return finisher.finishForced(RunInterrupted, presenter.finishText())
+			}
+			interruptBeforePrompt = true
+			presenter.suppressText = true
+		case result := <-promptStarts:
+			if result.err != nil {
+				if !interruptBeforePrompt {
+					select {
+					case <-interrupts:
+						interruptBeforePrompt = true
+						presenter.suppressText = true
+					default:
+					}
+				}
+				runErr := errors.Join(fmt.Errorf("prompt pi: %w", result.err), presenter.finishText())
+				if interruptBeforePrompt {
+					return finisher.finishInterrupt(RunInterrupted, runErr, interrupts)
+				}
+				outcome, classifiedErr := classifyRunError(ctx, runErr)
+				return finisher.finish(outcome, classifiedErr)
+			}
+			promptResults = result.acceptance
+			if interruptBeforePrompt {
+				interrupt.start(session, &presenter)
+			}
+		}
 	}
 
-	promptResults := make(chan error, 1)
-	go func() {
-		promptResults <- session.Prompt(ctx, options.Message, "")
-	}()
-
-	agentStarted := false
 	settledBeforeAcceptance := false
 promptWait:
 	for {
@@ -220,35 +327,49 @@ promptWait:
 				return finisher.finish(RunCompleted, err)
 			}
 			return finisher.finish(RunInterrupted, nil)
+		case <-interrupts:
+			if done, outcome, interruptErr := handleInterrupt(); done {
+				return outcome, interruptErr
+			}
+		case abortErr := <-interrupt.results:
+			if done, outcome, finishErr := handleAbortResult(abortErr); done {
+				return outcome, finishErr
+			}
 		case event, open := <-events:
 			if !open {
-				return finisher.finishExited(presenter.finishText())
+				return finisher.finishExited(interrupt.started, errors.Join(interrupt.err, presenter.finishText()))
 			}
-			settled, eventErr := processEvent(event)
+			settled, eventErr := handleEvent(event)
 			if eventErr != nil {
-				runErr := errors.Join(eventErr, presenter.finishText())
-				return finisher.finish(RunCompleted, runErr)
-			}
-			if event.Type == "agent_start" {
-				agentStarted = true
+				return finishEventError(eventErr)
 			}
 			settledBeforeAcceptance = settledBeforeAcceptance || settled
+			if interrupt.started && interrupt.complete && interrupt.settled {
+				return finishInterrupted(false, nil)
+			}
 		case promptErr := <-promptResults:
 			if promptErr != nil {
+				if interrupt.started {
+					return finishInterrupted(false, fmt.Errorf("prompt pi: %w", promptErr))
+				}
 				outcome, runErr := classifyRunError(ctx, fmt.Errorf("prompt pi: %w", promptErr))
 				runErr = errors.Join(runErr, presenter.finishText())
 				return finisher.finish(outcome, runErr)
 			}
 			if err := storage.Touch(sessionID, dependencies.now().UTC()); err != nil {
 				runErr := errors.Join(fmt.Errorf("record accepted prompt: %w", err), presenter.finishText())
+				if interrupt.started {
+					return finishInterrupted(false, runErr)
+				}
 				return finisher.finish(RunCompleted, runErr)
 			}
 			break promptWait
 		}
 	}
-	if settledBeforeAcceptance {
-		runErr := errors.Join(presenter.finalAssistantErr, presenter.finishText())
-		return finisher.finish(RunCompleted, runErr)
+	if settledBeforeAcceptance && !interrupt.started {
+		if done, outcome, finishErr := finishSettled(); done {
+			return outcome, finishErr
+		}
 	}
 
 	type stateResult struct {
@@ -266,25 +387,76 @@ promptWait:
 	for {
 		if idleConfirmed {
 			select {
-			case event, open := <-events:
-				if !open {
-					return finisher.finishExited(presenter.finishText())
-				}
-				settled, eventErr := finishAfterEvent(event)
-				if eventErr != nil || settled {
-					return finisher.finish(RunCompleted, eventErr)
-				}
-				if event.Type == "agent_start" {
-					agentStarted = true
+			case <-interrupts:
+				if done, outcome, interruptErr := handleInterrupt(); done {
+					return outcome, interruptErr
 				}
 				continue
 			default:
-				if !agentStarted {
+			}
+			select {
+			case event, open := <-events:
+				if !open {
+					return finisher.finishExited(interrupt.started, errors.Join(interrupt.err, presenter.finishText()))
+				}
+				settled, eventErr := handleEvent(event)
+				if eventErr != nil {
+					runErr := errors.Join(eventErr, presenter.finishText())
+					if interrupt.started {
+						return finishInterrupted(false, runErr)
+					}
+					return finisher.finish(RunCompleted, runErr)
+				}
+				if settled {
+					if interrupt.started {
+						if interrupt.complete {
+							return finishInterrupted(false, nil)
+						}
+						continue
+					}
+					select {
+					case <-interrupts:
+						if done, outcome, interruptErr := handleInterrupt(); done {
+							return outcome, interruptErr
+						}
+						continue
+					default:
+						return finisher.finish(RunCompleted, errors.Join(presenter.finalAssistantErr, presenter.finishText()))
+					}
+				}
+				continue
+			default:
+				if !interrupt.agentStarted {
 					if !piVersion.Verified {
 						runErr := fmt.Errorf("cannot safely determine prompt completion with unverified pi %s: pi reported idle before agent_start", piVersion.Found)
-						return finisher.finish(RunCompleted, runErr)
+						if interrupt.started {
+							return finishInterrupted(false, runErr)
+						}
+						select {
+						case <-interrupts:
+							if done, outcome, interruptErr := handleInterrupt(); done {
+								return outcome, interruptErr
+							}
+							continue
+						default:
+							return finisher.finish(RunCompleted, runErr)
+						}
 					}
-					return finisher.finish(RunCompleted, presenter.finishText())
+					if interrupt.started {
+						if interrupt.complete {
+							return finishInterrupted(false, nil)
+						}
+					} else {
+						select {
+						case <-interrupts:
+							if done, outcome, interruptErr := handleInterrupt(); done {
+								return outcome, interruptErr
+							}
+							continue
+						default:
+							return finisher.finish(RunCompleted, presenter.finishText())
+						}
+					}
 				}
 			}
 		}
@@ -295,20 +467,49 @@ promptWait:
 				return finisher.finish(RunCompleted, err)
 			}
 			return finisher.finish(RunInterrupted, nil)
+		case <-interrupts:
+			if done, outcome, interruptErr := handleInterrupt(); done {
+				return outcome, interruptErr
+			}
+		case abortErr := <-interrupt.results:
+			if done, outcome, finishErr := handleAbortResult(abortErr); done {
+				return outcome, finishErr
+			}
 		case event, open := <-events:
 			if !open {
-				return finisher.finishExited(presenter.finishText())
+				return finisher.finishExited(interrupt.started, errors.Join(interrupt.err, presenter.finishText()))
 			}
-			settled, eventErr := finishAfterEvent(event)
-			if eventErr != nil || settled {
-				return finisher.finish(RunCompleted, eventErr)
+			settled, eventErr := handleEvent(event)
+			if eventErr != nil {
+				runErr := errors.Join(eventErr, presenter.finishText())
+				if interrupt.started {
+					return finishInterrupted(false, runErr)
+				}
+				return finisher.finish(RunCompleted, runErr)
 			}
-			if event.Type == "agent_start" {
-				agentStarted = true
+			if settled {
+				if interrupt.started {
+					if interrupt.complete {
+						return finishInterrupted(false, nil)
+					}
+					continue
+				}
+				select {
+				case <-interrupts:
+					if done, outcome, interruptErr := handleInterrupt(); done {
+						return outcome, interruptErr
+					}
+					continue
+				default:
+					return finisher.finish(RunCompleted, errors.Join(presenter.finalAssistantErr, presenter.finishText()))
+				}
 			}
 		case result := <-stateResults:
 			stateResults = nil
 			if result.err != nil {
+				if interrupt.started {
+					return finishInterrupted(false, fmt.Errorf("check pi state after prompt acceptance: %w", result.err))
+				}
 				outcome, runErr := classifyRunError(ctx, fmt.Errorf("check pi state after prompt acceptance: %w", result.err))
 				runErr = errors.Join(runErr, presenter.finishText())
 				return finisher.finish(outcome, runErr)
@@ -316,11 +517,33 @@ promptWait:
 			streaming, stateErr := runSessionStreaming(result.raw)
 			if stateErr != nil {
 				runErr := errors.Join(stateErr, presenter.finishText())
+				if interrupt.started {
+					return finishInterrupted(false, runErr)
+				}
 				return finisher.finish(RunCompleted, runErr)
 			}
 			idleConfirmed = !streaming
 		}
 	}
+}
+
+type runInterruptState struct {
+	started      bool
+	complete     bool
+	settled      bool
+	agentStarted bool
+	results      <-chan error
+	err          error
+}
+
+func (s *runInterruptState) start(session runSession, presenter *runPresenter) {
+	s.started = true
+	presenter.suppressText = true
+	results := make(chan error, 1)
+	s.results = results
+	go func() {
+		results <- session.Abort(context.Background())
+	}()
 }
 
 type runFinisher struct {
@@ -330,15 +553,62 @@ type runFinisher struct {
 	sessionID   string
 	sessionFile string
 	logPath     string
+	logger      *log.Logger
+	crashLogged bool
 }
 
-func (f *runFinisher) finishExited(textErr error) (RunOutcome, error) {
+func (f *runFinisher) finishExited(interrupted bool, textErr error) (RunOutcome, error) {
 	exitErr := f.session.ExitErr()
 	if exitErr == nil {
 		exitErr = errors.New("event stream closed")
 	}
+	f.logCrashTail()
 	runErr := errors.Join(fmt.Errorf("pi exited before agent settled: %w", exitErr), textErr)
-	return f.finish(RunCompleted, runErr)
+	outcome := RunCompleted
+	if interrupted {
+		outcome = RunInterrupted
+	}
+	return f.finish(outcome, runErr)
+}
+
+func (f *runFinisher) logCrashTail() {
+	if f.crashLogged {
+		return
+	}
+	f.crashLogged = true
+	tail, truncated, err := readFileTail(f.logPath, crashTailSize)
+	if err != nil {
+		f.logger.Error("read pi stderr after unexpected exit", "stderr_log", f.logPath, "error", err)
+		return
+	}
+	f.logger.Error(
+		"pi exited unexpectedly",
+		"stderr_log", f.logPath,
+		"stderr_tail", tail,
+		"stderr_tail_truncated", truncated,
+	)
+}
+
+func readFileTail(path string, size int64) (string, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return "", false, err
+	}
+	start := max(info.Size()-size, 0)
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return "", false, err
+	}
+	contents, err := io.ReadAll(file)
+	if err != nil {
+		return "", false, err
+	}
+	return strings.TrimSpace(strings.ToValidUTF8(string(contents), "")), start > 0, nil
 }
 
 func runSessionStreaming(stateRaw json.RawMessage) (bool, error) {
@@ -359,25 +629,61 @@ func classifyRunError(ctx context.Context, err error) (RunOutcome, error) {
 }
 
 func (f *runFinisher) finish(outcome RunOutcome, runErr error) (RunOutcome, error) {
-	closeErr := closeRunSession(f.session)
+	return f.finishWithClose(outcome, runErr, false, nil)
+}
+
+func (f *runFinisher) finishForced(outcome RunOutcome, runErr error) (RunOutcome, error) {
+	return f.finishWithClose(outcome, runErr, true, nil)
+}
+
+func (f *runFinisher) finishInterrupt(outcome RunOutcome, runErr error, interrupts <-chan os.Signal) (RunOutcome, error) {
+	return f.finishWithClose(outcome, runErr, false, interrupts)
+}
+
+func (f *runFinisher) finishWithClose(outcome RunOutcome, runErr error, force bool, interrupts <-chan os.Signal) (RunOutcome, error) {
+	closeErr := closeRunSession(f.session, force, interrupts)
+	if errors.Is(runErr, pisession.ErrProcessExited) {
+		f.logCrashTail()
+	}
 	var registryErr error
-	if closeErr == nil {
-		if err := f.storage.SetStatus(f.sessionID, store.StatusStopped); err != nil {
-			registryErr = fmt.Errorf("record stopped session: %w", err)
-		} else if _, err := fmt.Fprintf(f.stderr, "[session] id=%s status=stopped file=%s log=%s\n", f.sessionID, f.sessionFile, f.logPath); err != nil {
-			registryErr = fmt.Errorf("write final session details: %w", err)
-		}
+	if err := f.storage.SetStatus(f.sessionID, store.StatusStopped); err != nil {
+		registryErr = fmt.Errorf("record stopped session: %w", err)
+	} else if _, err := fmt.Fprintf(f.stderr, "[session] id=%s status=stopped file=%s log=%s\n", f.sessionID, f.sessionFile, f.logPath); err != nil {
+		registryErr = fmt.Errorf("write final session details: %w", err)
 	}
 	return outcome, errors.Join(runErr, closeErr, registryErr)
 }
 
-func closeRunSession(session runSession) error {
+func closeRunSession(session runSession, force bool, interrupts <-chan os.Signal) error {
 	ctx, cancel := context.WithTimeout(context.Background(), runCleanupTimeout)
 	defer cancel()
-	if err := session.Close(ctx); err != nil {
-		return fmt.Errorf("stop pi: %w", err)
+	if force {
+		cancel()
 	}
-	return nil
+	if interrupts == nil {
+		if err := session.Close(ctx); err != nil {
+			return fmt.Errorf("stop pi: %w", err)
+		}
+		return nil
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- session.Close(ctx)
+	}()
+	select {
+	case err := <-result:
+		if err != nil {
+			return fmt.Errorf("stop pi: %w", err)
+		}
+		return nil
+	case <-interrupts:
+		cancel()
+		if err := <-result; err != nil {
+			return fmt.Errorf("force pi shutdown: %w", err)
+		}
+		return nil
+	}
 }
 
 func unknownSessionTypeError(name string, configured map[string]config.SessionType) error {
@@ -395,6 +701,7 @@ func unknownSessionTypeError(name string, configured map[string]config.SessionTy
 type runPresenter struct {
 	stdout            io.Writer
 	stderr            io.Writer
+	suppressText      bool
 	wroteText         bool
 	endsNewline       bool
 	finalAssistantErr error
@@ -412,7 +719,7 @@ func (p *runPresenter) present(event pisession.Event) error {
 		if err := json.Unmarshal(event.Raw, &payload); err != nil {
 			return fmt.Errorf("decode pi message update: %w", err)
 		}
-		if payload.AssistantMessageEvent.Type != "text_delta" {
+		if payload.AssistantMessageEvent.Type != "text_delta" || p.suppressText {
 			return nil
 		}
 		if _, err := io.WriteString(p.stdout, payload.AssistantMessageEvent.Delta); err != nil {

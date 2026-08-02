@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -90,6 +91,9 @@ type fakePi struct {
 	file        *os.File
 	out         io.Writer
 	scenario    scenarios.Scenario
+	fatal       chan error
+	mu          sync.Mutex
+	outMu       sync.Mutex
 	entries     []entry
 	leafID      *string
 	nextID      uint32
@@ -97,6 +101,21 @@ type fakePi struct {
 	timeOffset  int64
 	isStreaming bool
 	sessionName string
+	activeRun   *scenarioRun
+}
+
+type scenarioRun struct {
+	abort     chan struct{}
+	done      chan struct{}
+	user      message
+	text      string
+	aborted   bool
+	finalized bool
+}
+
+type inputRecord struct {
+	line []byte
+	err  error
 }
 
 func main() {
@@ -229,6 +248,7 @@ func run(cfg config, scenario scenarios.Scenario, in io.Reader, out io.Writer) (
 		file:        file,
 		out:         out,
 		scenario:    scenario,
+		fatal:       make(chan error, 1),
 		entries:     make([]entry, 0),
 		nextID:      1,
 		baseTime:    time.Now().UTC().Truncate(time.Millisecond),
@@ -253,21 +273,63 @@ func run(cfg config, scenario scenarios.Scenario, in io.Reader, out io.Writer) (
 }
 
 func (p *fakePi) readCommands(in io.Reader) error {
+	records := make(chan inputRecord)
+	go readInput(in, records)
+
+	for {
+		select {
+		case err := <-p.fatal:
+			return err
+		case record, ok := <-records:
+			if !ok {
+				return p.waitForActiveRun()
+			}
+			if len(record.line) > 0 {
+				if err := p.handleLine(record.line); err != nil {
+					return err
+				}
+			}
+			if record.err != nil {
+				if errors.Is(record.err, io.EOF) {
+					return p.waitForActiveRun()
+				}
+				return fmt.Errorf("read command: %w", record.err)
+			}
+		}
+	}
+}
+
+func (p *fakePi) waitForActiveRun() error {
+	p.mu.Lock()
+	run := p.activeRun
+	p.mu.Unlock()
+	if run == nil {
+		return nil
+	}
+
+	select {
+	case err := <-p.fatal:
+		return err
+	case <-run.done:
+		select {
+		case err := <-p.fatal:
+			return err
+		default:
+			return nil
+		}
+	}
+}
+
+func readInput(in io.Reader, records chan<- inputRecord) {
+	defer close(records)
 	reader := bufio.NewReader(in)
 	for {
 		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			line = bytes.TrimSuffix(line, []byte{'\n'})
-			line = bytes.TrimSuffix(line, []byte{'\r'})
-			if handleErr := p.handleLine(line); handleErr != nil {
-				return handleErr
-			}
-		}
+		line = bytes.TrimSuffix(line, []byte{'\n'})
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		records <- inputRecord{line: line, err: err}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return fmt.Errorf("read command: %w", err)
+			return
 		}
 	}
 }
@@ -300,7 +362,7 @@ func (p *fakePi) handleLine(line []byte) error {
 	case "prompt", "steer", "follow_up":
 		return p.acceptPrompt(id, command, fields)
 	case "abort":
-		return p.writeResponse(p.success(id, command, nil))
+		return p.abort(id)
 	case "extension_ui_response":
 		return p.acceptUIResponse(fields)
 	default:
@@ -333,6 +395,9 @@ func (p *fakePi) acceptUIResponse(fields map[string]json.RawMessage) error {
 }
 
 func (p *fakePi) stateData() map[string]any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	data := map[string]any{
 		"model":                 fakeModel(),
 		"thinkingLevel":         "off",
@@ -343,7 +408,7 @@ func (p *fakePi) stateData() map[string]any {
 		"sessionFile":           p.sessionFile,
 		"sessionId":             p.cfg.sessionID,
 		"autoCompactionEnabled": true,
-		"messageCount":          p.messageCount(),
+		"messageCount":          p.messageCountLocked(),
 		"pendingMessageCount":   0,
 	}
 	if p.sessionName != "" {
@@ -353,15 +418,19 @@ func (p *fakePi) stateData() map[string]any {
 }
 
 func (p *fakePi) getEntries(id json.RawMessage, fields map[string]json.RawMessage) error {
-	entries := p.entries
+	p.mu.Lock()
+	entries := append([]entry(nil), p.entries...)
+	leafID := cloneStringPointer(p.leafID)
+	p.mu.Unlock()
+
 	if rawSince, ok := fields["since"]; ok {
 		var since string
 		if err := json.Unmarshal(rawSince, &since); err != nil || since == "" {
 			return p.writeResponse(p.failure(id, "get_entries", "since must be a non-empty string"))
 		}
 		index := -1
-		for i := range p.entries {
-			if p.entries[i].ID == since {
+		for i := range entries {
+			if entries[i].ID == since {
 				index = i
 				break
 			}
@@ -369,7 +438,7 @@ func (p *fakePi) getEntries(id json.RawMessage, fields map[string]json.RawMessag
 		if index == -1 {
 			return p.writeResponse(p.failure(id, "get_entries", fmt.Sprintf("entry not found: %s", since)))
 		}
-		entries = p.entries[index+1:]
+		entries = entries[index+1:]
 	}
 
 	if entries == nil {
@@ -377,7 +446,7 @@ func (p *fakePi) getEntries(id json.RawMessage, fields map[string]json.RawMessag
 	}
 	return p.writeResponse(p.success(id, "get_entries", map[string]any{
 		"entries": entries,
-		"leafId":  p.leafID,
+		"leafId":  leafID,
 	}))
 }
 
@@ -391,17 +460,22 @@ func (p *fakePi) setSessionName(id json.RawMessage, fields map[string]json.RawMe
 		return p.writeResponse(p.failure(id, "set_session_name", "session name cannot be empty"))
 	}
 
-	timestamp := p.nextTimestamp()
-	if err := p.appendEntry(entry{
+	p.mu.Lock()
+	timestamp := p.nextTimestampLocked()
+	err := p.appendEntryLocked(entry{
 		Type:      "session_info",
-		ID:        p.newEntryID(),
+		ID:        p.newEntryIDLocked(),
 		ParentID:  cloneStringPointer(p.leafID),
 		Timestamp: timestamp.Format(time.RFC3339Nano),
 		Name:      name,
-	}); err != nil {
+	})
+	if err == nil {
+		p.sessionName = name
+	}
+	p.mu.Unlock()
+	if err != nil {
 		return err
 	}
-	p.sessionName = name
 	if err := p.writeOutput(map[string]any{"type": "session_info_changed", "name": name}); err != nil {
 		return err
 	}
@@ -414,46 +488,111 @@ func (p *fakePi) acceptPrompt(id json.RawMessage, command string, fields map[str
 		return p.writeResponse(p.failure(id, command, "message must be a string"))
 	}
 
-	timestamp := p.nextTimestamp()
+	p.mu.Lock()
+	if p.activeRun != nil {
+		p.mu.Unlock()
+		return p.writeResponse(p.failure(id, command, "agent is already streaming"))
+	}
+	timestamp := p.nextTimestampLocked()
 	userMessage := message{Role: "user", Content: prompt, Timestamp: timestamp.UnixMilli()}
-	if err := p.appendEntry(entry{
+	if err := p.appendEntryLocked(entry{
 		Type:      "message",
-		ID:        p.newEntryID(),
+		ID:        p.newEntryIDLocked(),
 		ParentID:  cloneStringPointer(p.leafID),
 		Timestamp: timestamp.Format(time.RFC3339Nano),
 		Message:   &userMessage,
 	}); err != nil {
+		p.mu.Unlock()
 		return err
 	}
+	run := &scenarioRun{abort: make(chan struct{}), done: make(chan struct{}), user: userMessage}
+	p.activeRun = run
+	p.mu.Unlock()
+
 	if err := p.writeResponse(p.success(id, command, nil)); err != nil {
+		p.finishRun(run)
 		return err
 	}
-	return p.playScenario(userMessage)
+	go p.executeScenario(run)
+	return nil
 }
 
-func (p *fakePi) playScenario(userMessage message) error {
-	var text string
+func (p *fakePi) abort(id json.RawMessage) error {
+	p.mu.Lock()
+	run := p.activeRun
+	if run != nil && !run.aborted && !run.finalized {
+		run.aborted = true
+		close(run.abort)
+	}
+	p.mu.Unlock()
+
+	if run != nil {
+		<-run.done
+	}
+	return p.writeResponse(p.success(id, "abort", nil))
+}
+
+func (p *fakePi) executeScenario(run *scenarioRun) {
+	err := p.playScenario(run)
+	if err != nil {
+		p.fatal <- err
+	}
+	p.finishRun(run)
+}
+
+func (p *fakePi) finishRun(run *scenarioRun) {
+	p.mu.Lock()
+	if p.activeRun == run {
+		p.activeRun = nil
+	}
+	select {
+	case <-run.done:
+	default:
+		close(run.done)
+	}
+	p.mu.Unlock()
+}
+
+func (p *fakePi) playScenario(run *scenarioRun) error {
 	var finalMessage message
 
 	for _, step := range p.scenario.Steps {
-		if step.Delay > 0 {
-			time.Sleep(step.Delay)
+		if !p.waitForStep(run, step.Delay) {
+			return p.settleAborted(run)
 		}
+
 		switch step.Type {
 		case scenarios.AgentStart:
+			p.mu.Lock()
+			if run.aborted {
+				p.mu.Unlock()
+				return p.settleAborted(run)
+			}
 			p.isStreaming = true
+			p.mu.Unlock()
 			if err := p.writeOutput(map[string]any{"type": "agent_start"}); err != nil {
 				return err
 			}
 		case scenarios.MessageStart:
-			started := p.assistantMessage("")
+			p.mu.Lock()
+			if run.aborted {
+				p.mu.Unlock()
+				return p.settleAborted(run)
+			}
+			started := p.assistantMessageLocked("")
+			p.mu.Unlock()
 			if err := p.writeOutput(map[string]any{"type": "message_start", "message": started}); err != nil {
 				return err
 			}
 		case scenarios.TextDelta:
-			text += step.Text
-			partial := p.assistantMessage(text)
-			if err := p.writeOutput(map[string]any{
+			p.mu.Lock()
+			if run.aborted {
+				p.mu.Unlock()
+				return p.settleAborted(run)
+			}
+			run.text += step.Text
+			partial := p.assistantMessageLocked(run.text)
+			err := p.writeOutput(map[string]any{
 				"type":    "message_update",
 				"message": partial,
 				"assistantMessageEvent": map[string]any{
@@ -462,21 +601,33 @@ func (p *fakePi) playScenario(userMessage message) error {
 					"delta":        step.Text,
 					"partial":      partial,
 				},
-			}); err != nil {
+			})
+			p.mu.Unlock()
+			if err != nil {
 				return err
 			}
 		case scenarios.MessageEnd:
-			finalMessage = p.assistantMessage(text)
+			p.mu.Lock()
+			if run.aborted {
+				p.mu.Unlock()
+				return p.settleAborted(run)
+			}
+			finalMessage = p.assistantMessageLocked(run.text)
 			finalMessage.StopReason = "stop"
-			timestamp := p.nextTimestamp()
+			timestamp := p.nextTimestampLocked()
 			finalMessage.Timestamp = timestamp.UnixMilli()
-			if err := p.appendEntry(entry{
+			err := p.appendEntryLocked(entry{
 				Type:      "message",
-				ID:        p.newEntryID(),
+				ID:        p.newEntryIDLocked(),
 				ParentID:  cloneStringPointer(p.leafID),
 				Timestamp: timestamp.Format(time.RFC3339Nano),
 				Message:   &finalMessage,
-			}); err != nil {
+			})
+			if err == nil {
+				run.finalized = true
+			}
+			p.mu.Unlock()
+			if err != nil {
 				return err
 			}
 			if err := p.writeOutput(map[string]any{"type": "message_end", "message": finalMessage}); err != nil {
@@ -485,16 +636,20 @@ func (p *fakePi) playScenario(userMessage message) error {
 		case scenarios.AgentEnd:
 			if err := p.writeOutput(map[string]any{
 				"type":      "agent_end",
-				"messages":  []message{userMessage, finalMessage},
+				"messages":  []message{run.user, finalMessage},
 				"willRetry": false,
 			}); err != nil {
 				return err
 			}
 		case scenarios.AgentSettled:
+			p.mu.Lock()
 			p.isStreaming = false
+			p.mu.Unlock()
 			if err := p.writeOutput(map[string]any{"type": "agent_settled"}); err != nil {
 				return err
 			}
+		case scenarios.Crash:
+			return fmt.Errorf("scenario crash_mid_stream: deterministic crash after first delta")
 		default:
 			return fmt.Errorf("scenario %q has unsupported step %q", p.scenario.Name, step.Type)
 		}
@@ -502,7 +657,61 @@ func (p *fakePi) playScenario(userMessage message) error {
 	return nil
 }
 
-func (p *fakePi) assistantMessage(text string) message {
+func (p *fakePi) waitForStep(run *scenarioRun, delay time.Duration) bool {
+	if delay == 0 {
+		p.mu.Lock()
+		aborted := run.aborted
+		p.mu.Unlock()
+		return !aborted
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-run.abort:
+		return false
+	}
+}
+
+func (p *fakePi) settleAborted(run *scenarioRun) error {
+	p.mu.Lock()
+	finalMessage := p.assistantMessageLocked(run.text)
+	finalMessage.StopReason = "aborted"
+	timestamp := p.nextTimestampLocked()
+	finalMessage.Timestamp = timestamp.UnixMilli()
+	err := p.appendEntryLocked(entry{
+		Type:      "message",
+		ID:        p.newEntryIDLocked(),
+		ParentID:  cloneStringPointer(p.leafID),
+		Timestamp: timestamp.Format(time.RFC3339Nano),
+		Message:   &finalMessage,
+	})
+	if err == nil {
+		run.finalized = true
+	}
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := p.writeOutput(map[string]any{"type": "message_end", "message": finalMessage}); err != nil {
+		return err
+	}
+	if err := p.writeOutput(map[string]any{
+		"type":      "agent_end",
+		"messages":  []message{run.user, finalMessage},
+		"willRetry": false,
+	}); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.isStreaming = false
+	p.mu.Unlock()
+	return p.writeOutput(map[string]any{"type": "agent_settled"})
+}
+
+func (p *fakePi) assistantMessageLocked(text string) message {
 	return message{
 		Role:     "assistant",
 		Content:  []textContent{{Type: "text", Text: text}},
@@ -526,6 +735,9 @@ func (p *fakePi) assistantMessage(text string) message {
 }
 
 func (p *fakePi) statsData() map[string]any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	userMessages := 0
 	assistantMessages := 0
 	for _, entry := range p.entries {
@@ -587,7 +799,7 @@ func fakeModel() map[string]any {
 	}
 }
 
-func (p *fakePi) messageCount() int {
+func (p *fakePi) messageCountLocked() int {
 	count := 0
 	for _, entry := range p.entries {
 		if entry.Message != nil {
@@ -597,19 +809,19 @@ func (p *fakePi) messageCount() int {
 	return count
 }
 
-func (p *fakePi) newEntryID() string {
+func (p *fakePi) newEntryIDLocked() string {
 	id := fmt.Sprintf("%08x", p.nextID)
 	p.nextID++
 	return id
 }
 
-func (p *fakePi) nextTimestamp() time.Time {
+func (p *fakePi) nextTimestampLocked() time.Time {
 	p.timeOffset++
 	return p.baseTime.Add(time.Duration(p.timeOffset) * time.Millisecond)
 }
 
-func (p *fakePi) appendEntry(value entry) error {
-	if err := p.writeFileRecord(value); err != nil {
+func (p *fakePi) appendEntryLocked(value entry) error {
+	if err := p.writeFileRecordLocked(value); err != nil {
 		return err
 	}
 	p.entries = append(p.entries, value)
@@ -619,6 +831,12 @@ func (p *fakePi) appendEntry(value entry) error {
 }
 
 func (p *fakePi) writeFileRecord(value any) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.writeFileRecordLocked(value)
+}
+
+func (p *fakePi) writeFileRecordLocked(value any) error {
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode session record: %w", err)
@@ -648,6 +866,8 @@ func (p *fakePi) writeOutput(value any) error {
 		return fmt.Errorf("encode protocol output: %w", err)
 	}
 	encoded = append(encoded, '\n')
+	p.outMu.Lock()
+	defer p.outMu.Unlock()
 	if _, err := p.out.Write(encoded); err != nil {
 		return fmt.Errorf("write protocol output: %w", err)
 	}

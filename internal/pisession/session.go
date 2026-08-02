@@ -16,7 +16,10 @@ import (
 	"charm.land/log/v2"
 )
 
-const spawnCleanupTimeout = 5 * time.Second
+const (
+	spawnCleanupTimeout  = 5 * time.Second
+	shutdownGraceTimeout = 5 * time.Second
+)
 
 type Config struct {
 	PiBin      string
@@ -37,16 +40,23 @@ type UIResolution struct {
 }
 
 type Session struct {
-	id       string
-	pid      int
-	cmd      *exec.Cmd
-	rpc      *rpcClient
-	stderr   *os.File
-	logger   *log.Logger
-	done     chan struct{}
-	complete chan struct{}
-	exitMu   sync.RWMutex
-	exitErr  error
+	id               string
+	pid              int
+	cmd              *exec.Cmd
+	rpc              *rpcClient
+	stderr           *os.File
+	logger           *log.Logger
+	done             chan struct{}
+	complete         chan struct{}
+	exitMu           sync.RWMutex
+	exitErr          error
+	shutdownOnce     sync.Once
+	shutdownDone     chan struct{}
+	shutdownEscalate chan struct{}
+	escalateOnce     sync.Once
+	shutdownMu       sync.RWMutex
+	shutdownErr      error
+	shutdownGrace    time.Duration
 }
 
 func Spawn(ctx context.Context, cfg Config) (*Session, error) {
@@ -93,14 +103,17 @@ func Spawn(ctx context.Context, cfg Config) (*Session, error) {
 		logger = log.New(io.Discard)
 	}
 	session := &Session{
-		id:       cfg.SessionID,
-		pid:      cmd.Process.Pid,
-		cmd:      cmd,
-		rpc:      newRPCClient(stdout, stdin, logger),
-		stderr:   stderr,
-		logger:   logger,
-		done:     make(chan struct{}),
-		complete: make(chan struct{}),
+		id:               cfg.SessionID,
+		pid:              cmd.Process.Pid,
+		cmd:              cmd,
+		rpc:              newRPCClient(stdout, stdin, logger),
+		stderr:           stderr,
+		logger:           logger,
+		done:             make(chan struct{}),
+		complete:         make(chan struct{}),
+		shutdownDone:     make(chan struct{}),
+		shutdownEscalate: make(chan struct{}),
+		shutdownGrace:    shutdownGraceTimeout,
 	}
 	go session.reap()
 
@@ -131,25 +144,53 @@ func validateConfig(cfg Config) error {
 }
 
 func (s *Session) Prompt(ctx context.Context, message, behavior string) error {
+	result, err := s.StartPrompt(ctx, message, behavior)
+	if err != nil {
+		return err
+	}
+	return <-result
+}
+
+func (s *Session) StartPrompt(ctx context.Context, message, behavior string) (<-chan error, error) {
 	fields := map[string]any{"message": message}
 	switch behavior {
 	case "":
 	case "steer", "followUp":
 		fields["streamingBehavior"] = behavior
 	default:
-		return fmt.Errorf("invalid streaming behavior %q", behavior)
+		return nil, fmt.Errorf("invalid streaming behavior %q", behavior)
 	}
-	_, err := s.rpc.command(ctx, "prompt", fields)
-	return err
+
+	written := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		defer close(result)
+		_, err := s.rpc.commandWithWritePolicy(ctx, "prompt", fields, unboundedResponseWait, written)
+		result <- err
+	}()
+	select {
+	case <-written:
+		return result, nil
+	case err := <-result:
+		select {
+		case <-written:
+			completed := make(chan error, 1)
+			completed <- err
+			close(completed)
+			return completed, nil
+		default:
+			return nil, err
+		}
+	}
 }
 
 func (s *Session) Abort(ctx context.Context) error {
-	_, err := s.rpc.command(ctx, "abort", nil)
+	_, err := s.rpc.commandWithPolicy(ctx, "abort", nil, boundedResponseWait)
 	return err
 }
 
 func (s *Session) GetState(ctx context.Context) (json.RawMessage, error) {
-	return s.rpc.command(ctx, "get_state", nil)
+	return s.rpc.commandWithPolicy(ctx, "get_state", nil, boundedResponseWait)
 }
 
 func (s *Session) GetEntries(ctx context.Context, since string) ([]json.RawMessage, string, error) {
@@ -157,7 +198,7 @@ func (s *Session) GetEntries(ctx context.Context, since string) ([]json.RawMessa
 	if since != "" {
 		fields = map[string]any{"since": since}
 	}
-	data, err := s.rpc.command(ctx, "get_entries", fields)
+	data, err := s.rpc.commandWithPolicy(ctx, "get_entries", fields, boundedResponseWait)
 	if err != nil {
 		var commandErr *commandError
 		if since != "" && errors.As(err, &commandErr) {
@@ -181,11 +222,11 @@ func (s *Session) GetEntries(ctx context.Context, since string) ([]json.RawMessa
 }
 
 func (s *Session) GetSessionStats(ctx context.Context) (json.RawMessage, error) {
-	return s.rpc.command(ctx, "get_session_stats", nil)
+	return s.rpc.commandWithPolicy(ctx, "get_session_stats", nil, boundedResponseWait)
 }
 
 func (s *Session) SetSessionName(ctx context.Context, name string) error {
-	_, err := s.rpc.command(ctx, "set_session_name", map[string]any{"name": name})
+	_, err := s.rpc.commandWithPolicy(ctx, "set_session_name", map[string]any{"name": name}, boundedResponseWait)
 	return err
 }
 
@@ -206,28 +247,74 @@ func (s *Session) Events() <-chan Event {
 }
 
 func (s *Session) Close(ctx context.Context) error {
+	s.shutdownOnce.Do(func() {
+		go s.shutdown()
+	})
+
+	select {
+	case <-s.shutdownDone:
+		return s.shutdownError()
+	case <-ctx.Done():
+		s.escalateOnce.Do(func() {
+			close(s.shutdownEscalate)
+		})
+		<-s.shutdownDone
+		return s.shutdownError()
+	}
+}
+
+func (s *Session) shutdown() {
+	defer close(s.shutdownDone)
+	s.rpc.close()
+
 	select {
 	case <-s.complete:
-		return nil
+		return
 	default:
 	}
 
-	s.rpc.close()
 	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		select {
-		case <-s.complete:
-			return nil
-		default:
-			return fmt.Errorf("signal pi with SIGTERM: %w", err)
-		}
+		s.setShutdownError(fmt.Errorf("signal pi with SIGTERM: %w", err))
+		s.kill()
+		<-s.complete
+		return
 	}
 
+	grace := s.shutdownGrace
+	if grace <= 0 {
+		grace = shutdownGraceTimeout
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
 	select {
 	case <-s.complete:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		return
+	case <-s.shutdownEscalate:
+		s.logger.Warn("forcing immediate pi shutdown", "pid", s.pid)
+	case <-timer.C:
+		s.logger.Warn("pi did not exit after SIGTERM; forcing shutdown", "pid", s.pid, "grace", grace)
 	}
+
+	s.kill()
+	<-s.complete
+}
+
+func (s *Session) kill() {
+	if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		s.setShutdownError(fmt.Errorf("kill pi with SIGKILL: %w", err))
+	}
+}
+
+func (s *Session) setShutdownError(err error) {
+	s.shutdownMu.Lock()
+	s.shutdownErr = errors.Join(s.shutdownErr, err)
+	s.shutdownMu.Unlock()
+}
+
+func (s *Session) shutdownError() error {
+	s.shutdownMu.RLock()
+	defer s.shutdownMu.RUnlock()
+	return s.shutdownErr
 }
 
 func (s *Session) Done() <-chan struct{} {
@@ -260,8 +347,8 @@ func (s *Session) reap() {
 	if waitErr != nil {
 		processErr = fmt.Errorf("%w: %v", ErrProcessExited, waitErr)
 	}
-	s.rpc.failPending(processErr)
-	s.rpc.close()
+	s.rpc.stop(processErr)
+	s.rpc.closeWriter()
 	<-s.rpc.writerDone
 	if err := s.stderr.Close(); err != nil {
 		s.logger.Error("close pi stderr log", "error", err)
@@ -274,12 +361,5 @@ func (s *Session) reap() {
 func (s *Session) cleanupFailedSpawn() error {
 	ctx, cancel := context.WithTimeout(context.Background(), spawnCleanupTimeout)
 	defer cancel()
-	if err := s.Close(ctx); err == nil {
-		return nil
-	}
-	if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("kill pi after readiness failure: %w", err)
-	}
-	<-s.complete
-	return nil
+	return s.Close(ctx)
 }
