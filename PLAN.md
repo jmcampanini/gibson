@@ -39,7 +39,7 @@ plan. Known planning inconsistencies are recorded in
 - [x] Chunk 1 — Reliable pi test environment
 - [x] Chunk 2 — Correct RPC transport and launch arguments
 - [x] Chunk 3 — Basic live pi session
-- [ ] Chunk 4 — First human-drivable run
+- [x] Chunk 4 — First human-drivable run
 - [ ] Chunk 5 — Interruptible and crash-safe runs
 - [ ] Chunk 6 — Named-checkout runs and storage hardening
 - [ ] Chunk 7 — Hostile records and extension boundaries
@@ -159,29 +159,36 @@ Deliver the first meaningful M1 capability outside internal tests: a human can i
 compiled `gibson run <type> <message>` command in the launch checkout, watch one answer
 stream, and inspect the durable result after Gibson exits.
 
-- [ ] Add final-shaped core storage under the launch checkout: the `.gibson/sessions/` and
+- [x] Add final-shaped core storage under the launch checkout: the `.gibson/sessions/` and
   `.gibson/logs/` layout, readable cryptographically random pi-compatible session IDs, and
   an in-process-serialized, atomically replaced versioned registry with session identity,
   configured type, timestamps, status, and diagnostic PID.
-- [ ] Add `internal/app/run.go` to locate the workspace, load validated configuration,
+- [x] Add `internal/app/run.go` to locate the workspace, load validated configuration,
   resolve the configured session type, resolve and check pi, create the session, prompt
   once, drain through `agent_settled`, and always stop the process.
-- [ ] Add `gibson run <type> <message>` as a thin Cobra adapter without changing `serve`;
+- [x] Add `gibson run <type> <message>` as a thin Cobra adapter without changing `serve`;
   do not add `--checkout` until Chunk 6.
-- [ ] Stream only assistant text deltas to stdout, adding a trailing newline only when
+- [x] Stream only assistant text deltas to stdout, adding a trailing newline only when
   needed, and send session details, tool activity, notifications, errors, and a visible
   blocking-dialog warning to stderr.
-- [ ] Record the process as live after spawn, update activity when work becomes durable,
+- [x] Record the process as live after spawn, update activity when work becomes durable,
   and leave every completed one-shot stopped, resumable later, and with PID zero.
-- [ ] Map normal, failed, and interrupted outcomes to exit codes 0, 1, and 130 while
+- [x] Map normal, failed, and interrupted outcomes to exit codes 0, 1, and 130 while
   preserving exactly one top-level presentation of failures.
-- [ ] On Ctrl+C, safely close immediately and exit 130 for this first slice; defer graceful
+- [x] On Ctrl+C, safely close immediately and exit 130 for this first slice; defer graceful
   durable abort and second-interrupt semantics to Chunk 5.
-- [ ] Add the opt-in real-pi lifecycle check without issuing a prompt or incurring LLM cost.
+- [x] Add the opt-in real-pi lifecycle check without issuing a prompt or incurring LLM cost.
+- [x] Add an opt-in real-pi prompt-ordering check with a deterministic local provider and
+  extension-handled command, without network access or LLM cost.
 
 The storage packages and on-disk schema introduced here are the final M1 shape. Early runs
 remain disposable while collision, leftover-temp-file, exhaustive transition, and hostile
-permission hardening are deliberately deferred to Chunk 6.
+permission hardening are deliberately deferred to Chunk 6. Prompt requests remain bounded
+by caller cancellation or transport lifetime rather than the generic command timeout so
+pre-acceptance extension dialogs can wait; D-017 owns the final cross-milestone timeout
+contract. Only the verified pi line may classify an idle post-prompt state with no agent
+run as synchronously handled; unverified versions fail loudly rather than risk silent
+success.
 
 ### Dependencies
 
@@ -189,19 +196,20 @@ Chunks 1–3.
 
 ### Verification criteria
 
-- [ ] Root help exposes `run`; a configured type completes one prompt through the compiled
+- [x] Root help exposes `run`; a configured type completes one prompt through the compiled
   binary and streams the expected assistant text.
-- [ ] `quick`, when used in a proof, comes from `[sessions.quick]`; an unknown type fails
+- [x] `quick`, when used in a proof, comes from `[sessions.quick]`; an unknown type fails
   clearly, lists configured types, and does not spawn pi.
-- [ ] The session JSONL, registry record, and stderr log have matching identity and remain
+- [x] The session JSONL, registry record, and stderr log have matching identity and remain
   under the launch checkout's `.gibson/` directory.
-- [ ] Normal completion exits 0 with stopped status and PID zero; a basic failure exits 1;
+- [x] Normal completion exits 0 with stopped status and PID zero; a basic failure exits 1;
   an interrupt exits 130 and leaves no matching pi process.
-- [ ] Stdout remains pipeable assistant text while human diagnostics remain on stderr.
-- [ ] Blocking dialogs produce a visible warning that `gibson run` cannot answer them.
-- [ ] The opt-in no-prompt real-pi lifecycle check passes when enabled.
-- [ ] Generated `.gibson/` state causes no Git status noise.
-- [ ] `make check` passes.
+- [x] Stdout remains pipeable assistant text while human diagnostics remain on stderr.
+- [x] Blocking dialogs produce a visible warning that `gibson run` cannot answer them.
+- [x] The opt-in no-prompt lifecycle and deterministic prompt-ordering real-pi checks pass
+  when enabled.
+- [x] Generated `.gibson/` state causes no Git status noise.
+- [x] `make check` passes.
 
 ### Mandatory approval gate
 
@@ -217,6 +225,8 @@ pi exit, and repeated cleanup without expanding it into a sustained conversation
 
 - [ ] Add slow-stream and crash fake-pi scenarios that exercise real subprocess timing and
   failure boundaries.
+- [ ] Replace Chunk 4's context-only interrupt trigger with signal-aware input while
+  keeping caller context cancellation as a separate shutdown path.
 - [ ] On the first interrupt, send `abort`, keep draining until the aborted assistant
   message is durable and the agent settles, then stop and exit 130.
 - [ ] On a second interrupt, force immediate shutdown and exit 130.
@@ -227,6 +237,8 @@ pi exit, and repeated cleanup without expanding it into a sustained conversation
   pump, reap, completion, and channel-close ordering.
 - [ ] Preserve useful pi stderr diagnostics on crashes and clear the registry PID on every
   normal, aborted, forced, or failed exit path.
+- [ ] Preserve exit 130 when interrupt cleanup adds shutdown or registry diagnostics, and
+  attempt stopped-status/PID cleanup after either graceful or forced process termination.
 
 ### Dependencies
 
@@ -237,7 +249,7 @@ Chunks 1–4, including the complete one-shot application workflow and storage l
 - [ ] A first interrupt stops further deltas, persists an assistant entry with
   `stopReason:"aborted"`, reaches `agent_settled`, exits 130, and leaves no orphan.
 - [ ] A second interrupt forces prompt shutdown, exits 130, clears the PID, and leaves no
-  orphan.
+  orphan; cleanup failures remain visible without reclassifying the interrupt as exit 1.
 - [ ] A crash exits 1, fails pending work, records final exit information, closes event
   delivery last, preserves a useful stderr tail, and leaves stopped registry state.
 - [ ] Repeated close calls neither leak, double-reap, nor corrupt completion state.
@@ -267,6 +279,8 @@ storage guarantees deferred from the first human-drivable slice.
   headers, regenerating after every collision.
 - [ ] Harden registry metadata preservation, exhaustive status transitions, file and
   directory permissions, and interrupted or leftover temporary-file behavior.
+- [ ] Serialize registry read-modify-write operations across Gibson processes, reload the
+  latest state while holding the lock, and atomically replace the file before unlocking.
 - [ ] Find pi session files by reading their header IDs rather than trusting filenames.
 - [ ] Reject unknown, missing, traversing, and non-Git targets before spawning pi.
 
@@ -284,7 +298,8 @@ Chunks 1–5.
 - [ ] Storage paths, formats, and permissions match the M1 contract.
 - [ ] IDs match the required format and regenerate for every collision source.
 - [ ] Leftover temporary files cannot replace or corrupt a readable registry.
-- [ ] Registry updates preserve metadata and enforce every intended status transition.
+- [ ] Registry updates preserve metadata and enforce every intended status transition;
+  concurrent one-shot processes retain both records without lost updates.
 - [ ] Session files are found by header identity even when filenames are opaque.
 - [ ] Generated state produces no Git status noise in either checkout.
 - [ ] `make check` passes.
@@ -302,7 +317,8 @@ Prove the completed one-shot path against protocol records and extension behavio
 likely to corrupt a subprocess integration, while keeping full dialog UX outside M1.
 
 - [ ] Add fake-pi scenarios for a single record larger than 1 MB and for a blocking
-  extension confirmation dialog.
+  extension confirmation dialog, migrating Chunk 4's applicable scripted event tests to
+  the real subprocess scenarios.
 - [ ] Prove large records, CRLF boundaries, final unterminated records, and embedded Unicode
   line separators survive the complete process boundary without truncation or splitting.
 - [ ] Send extension UI responses through the shared writer without waiting for a command
@@ -344,7 +360,7 @@ workspace through the compiled binary and a real pi installation, correcting onl
 that prevent the already-specified behavior from passing.
 
 - [ ] Run every repository formatting, module, lint, race, build, and CLI gate.
-- [ ] Run the gated no-prompt real-pi protocol lifecycle check.
+- [ ] Run the gated no-prompt lifecycle and deterministic prompt-ordering real-pi checks.
 - [ ] Execute the complete numbered M1 acceptance workflow with a compiled Gibson binary,
   scratch launch checkout, and sibling checkout.
 - [ ] Capture evidence for the real-prompt happy path, artifact identity, registry state,
@@ -352,6 +368,9 @@ that prevent the already-specified behavior from passing.
   of orphan processes.
 - [ ] Sweep the implementation and plan against every M1 acceptance criterion without
   pulling HTTP, SSE, session-manager, browser, resume, or full dialog UX work forward.
+- [ ] Remove Chunk 4's transitional interrupt paths and obsolete scripted-session test
+  scaffolding; retain its narrow session interface only if it still represents a genuine
+  production boundary after the final fake-pi scenarios land.
 
 ### Dependencies
 
@@ -383,7 +402,7 @@ After Chunk 8 is implemented, an agent must perform the following from
    to pass.
 2. Run
    `GIBSON_TEST_REAL_PI=1 go test ./internal/pisession/ -run RealPi -v` and require the
-   no-prompt real-pi protocol check to pass.
+   no-prompt lifecycle and deterministic prompt-ordering real-pi checks to pass.
 3. Execute every numbered step in §8 of
    `~/Code/github.com/jmcampanini/gibson/main/plans/MILESTONE_1.md` against the compiled
    binary and a clean scratch workspace under `.sandbox/`.

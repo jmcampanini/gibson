@@ -90,4 +90,24 @@ Entry format:
 - Reconciliation: remove the obsolete question, align M3 and later frontend plans with the
   binding Vitest contract, and verify links and commands during M1 consolidation.
 
-_The next entry number is D-017._
+## D-017: Prompt response waiting is exempt from the default command timeout
+
+- Recorded: 2026-08-02 during review of M1 Chunk 4; the temporary behavior was introduced
+  on 2026-07-30 to support extension-managed prompt handling and blocking dialogs.
+- Diverges from: `MILESTONE_CONVENTIONS.md` §6's unqualified 30-second default command
+  timeout; active `MILESTONE_1.md` §4.3 and its exit checklist repeat that rule.
+- Temporary behavior or decision: the pi `prompt` command type, including steer and
+  follow-up sends, has no transport timer and remains pending until caller cancellation,
+  process exit, transport closure, or a response. This preserves the blocking-dialog
+  behavior required by `SPEC.md` §§6.4.3 and 10.3, but leaves prompt writes and response
+  waits under one coarse policy.
+- Owner: M1 milestone owner.
+- Consolidate by: M1 boundary.
+- Reconciliation: decide separate write and response-wait bounds; replace the transport's
+  command-name check with session-owned internal policy if that remains the chosen shape;
+  pin the result in conventions §6; align M1's completed contract and tests; pursue an
+  upstream prompt-response disposition that can replace state inference; and carry the
+  blocked prompt-acceptance behavior into M2's create/message plan gate without
+  prematurely deciding its HTTP or later dialog UX.
+
+_The next entry number is D-018._

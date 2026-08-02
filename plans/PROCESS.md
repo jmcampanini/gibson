@@ -27,6 +27,15 @@ forecasts until they pass their plan-gate review. Both the active milestone file
 Branch names may follow the repository's current convention; the roles, ancestry, and
 pull-request targets above are the contract, not exact name strings.
 
+Before creating any commit, verify that `HEAD` is attached and that the active branch is
+the branch required by the current workflow step (for example, with
+`git symbolic-ref --short HEAD`). Being on an arbitrary non-`main` branch is not enough:
+chunk implementation and chunk-review fixes belong on that chunk's branch, while complete
+milestone review and consolidation changes belong on the milestone branch after the chunks
+have merged. If the active branch has the wrong role or ancestry, stop and switch to or
+create the correct branch before committing. Never create milestone or chunk commits
+directly on `main`.
+
 ## Chunk design
 
 Every milestone has multiple chunks, recorded in root `PLAN.md` in dependency order.

@@ -112,7 +112,10 @@ JSON object + `\n`.
   matching `{"type":"response","command":...,"success":...}` line.
 - Default timeout 30s per command (tighter caller ctx wins): on timeout the id is removed
   from the map and `ErrCommandTimeout` returned; a late response then arrives unmatched
-  and is logged + dropped.
+  and is logged + dropped. The `prompt` command family temporarily remains pending until
+  caller cancellation, process exit, transport closure, or a response so pre-acceptance
+  extension dialogs can wait as required; D-017 owns the final write/response timeout
+  split and cross-milestone contract.
 - `success:false` responses resolve the waiter with an error wrapping pi's `error` string.
   rpc.md note: pi parse errors come back as `{"type":"response","command":"parse",
   "success":false,...}` with no id — unmatched, logged at error level (it indicates a
@@ -245,8 +248,13 @@ type Record struct {
 }
 ```
 
-Writes: in-process `sync.Mutex` + write-temp-then-`os.Rename` (atomic), full-file
-read-modify-write. What `run` writes, when:
+Final M1 writes use process-local serialization plus a per-checkout cross-process lock.
+Every full-file read-modify-write mutation reloads the latest registry while holding the
+lock and completes its write-temp-then-`os.Rename` replacement before unlocking. This
+prevents concurrent one-shot commands, or a command overlapping the later server, from
+losing records while preserving atomic snapshots for readers. Chunk 4 establishes the
+process-local and atomic-replacement shape; Chunk 6 completes the cross-process protocol.
+What `run` writes, when:
 
 1. at spawn: `Put(Record{status: live, pid, createdAt=lastActivityAt=now})`;
 2. on accepted prompt and on each `message_end`: `Touch(id, now)` — `message_end` is
@@ -374,14 +382,15 @@ options: `WithPiBin(path)` (points
 
 ### 4.12 Real-pi gated tests
 
-Gated behind `GIBSON_TEST_REAL_PI=1` (conventions §9), same test files. The gated test
-deliberately avoids prompting (no LLM/network cost): spawn real pi in a testws checkout,
-readiness `get_state` (assert `sessionId` echoes ours), `GetEntries` (empty, `leafId`
-null — before any name is set), `SetSessionName`, `GetEntries` again (exactly one
-`session_info` entry, `leafId` == its id — `set_session_name` appends to the session
-tree), assert the session file exists under `.gibson/sessions/` with a matching header
-id, `Close` cleanly (exit 143). Full prompted runs against real pi are
-covered by the §8 agent workflow, not by `go test`.
+Gated behind `GIBSON_TEST_REAL_PI=1` (conventions §9), same test files. One gated test
+avoids prompting: spawn real pi in a testws checkout, probe readiness and entries, set the
+session name, verify the resulting entry and session header, and close cleanly with exit
+143. A second gated test loads a temporary deterministic provider and handled extension
+command, both local to the test: after an accepted real agent run, immediate `get_state`
+must report streaming until the provider is released; after the extension handles a
+command without a run, it must report idle. Both tests avoid network access and LLM cost.
+A full prompted run against an external provider remains in the §8 agent workflow rather
+than `go test`.
 
 ## 5. Implementation steps
 
@@ -420,7 +429,8 @@ covered by the §8 agent workflow, not by `go test`.
 10. `cmd/run.go` — add the Cobra adapter and wire it from `cmd/root.go`; `cmd/run_test.go`
     proves only argument/flag/application-input adaptation and outcome propagation. Keep
     process-exit mapping at the `main.go` boundary.
-11. `internal/pisession/session_realpi_test.go` — the gated no-LLM real-pi test (§4.12).
+11. `internal/pisession/session_realpi_test.go` — gated no-network real-pi lifecycle and
+    deterministic prompt-ordering tests (§4.12).
 12. Run the §8 proof workflow end-to-end; fix what it flushes out.
 
 ## 6. Interfaces exposed to later milestones
@@ -500,7 +510,8 @@ fakepi integration (default run):
 - `internal/app` one-shot integration per step 9 of §5, including outcomes that the
   process boundary maps to exit codes 0/1/130; `cmd/run_test.go` checks adaptation only.
 
-Real-pi gated (`GIBSON_TEST_REAL_PI=1`): the no-LLM lifecycle test of §4.12.
+Real-pi gated (`GIBSON_TEST_REAL_PI=1`): the no-network lifecycle and deterministic
+prompt-ordering tests of §4.12.
 
 ## 8. Agent-verified proof workflow
 

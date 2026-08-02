@@ -331,6 +331,71 @@ func TestRPCCommandFailuresAndTimeouts(t *testing.T) {
 		stopRPC(t, client)
 	})
 
+	t.Run("prompt accepts a delayed response", func(t *testing.T) {
+		input, source := io.Pipe()
+		output := &synchronizedBuffer{}
+		client := newRPCClient(input, output, nil)
+		client.commandTimeout = 20 * time.Millisecond
+		result := make(chan error, 1)
+
+		go func() {
+			_, err := client.command(context.Background(), "prompt", map[string]any{"message": "handled"})
+			result <- err
+		}()
+		require.Eventually(t, func() bool {
+			return bytes.HasSuffix(output.Bytes(), []byte{'\n'})
+		}, time.Second, time.Millisecond)
+		select {
+		case err := <-result:
+			t.Fatalf("prompt returned before its delayed response: %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		var command struct {
+			ID string `json:"id"`
+		}
+		require.NoError(t, json.Unmarshal(bytes.TrimSpace(output.Bytes()), &command))
+		require.NoError(t, writeJSONLine(source, map[string]any{
+			"id": command.ID, "type": "response", "command": "prompt", "success": true,
+		}))
+		require.NoError(t, <-result)
+
+		require.NoError(t, source.Close())
+		waitFor(t, client.pumpDone, "RPC pump")
+		stopRPC(t, client)
+	})
+
+	t.Run("pending prompt waits for caller cancellation", func(t *testing.T) {
+		input, source := io.Pipe()
+		output := &synchronizedBuffer{}
+		client := newRPCClient(input, output, nil)
+		client.commandTimeout = 20 * time.Millisecond
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+
+		go func() {
+			_, err := client.command(ctx, "prompt", map[string]any{"message": "dialog"})
+			result <- err
+		}()
+		require.Eventually(t, func() bool {
+			return bytes.HasSuffix(output.Bytes(), []byte{'\n'})
+		}, time.Second, time.Millisecond)
+		dialogRaw := []byte(`{"type":"extension_ui_request","method":"confirm","message":"Continue?"}`)
+		require.NoError(t, writeJSONLine(source, json.RawMessage(dialogRaw)))
+		assert.Equal(t, string(dialogRaw), string(receiveEvent(t, client.events).Raw))
+		select {
+		case err := <-result:
+			t.Fatalf("pending prompt returned without caller cancellation: %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+		cancel()
+		require.ErrorIs(t, <-result, context.Canceled)
+
+		require.NoError(t, source.Close())
+		waitFor(t, client.pumpDone, "RPC pump")
+		stopRPC(t, client)
+	})
+
 	t.Run("caller deadline wins", func(t *testing.T) {
 		input, source := io.Pipe()
 		client := newRPCClient(input, &synchronizedBuffer{}, nil)
