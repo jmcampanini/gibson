@@ -262,12 +262,13 @@ field, so nothing goes stale on rename):
   after the prompt is accepted.
 - **Process ownership and shutdown:** pi runs in a dedicated process group so terminal
   Ctrl+C reaches Gibson without preempting RPC abort. Close signals that group with
-  SIGTERM. Gibson tracks descendant ownership by PID/start time while pi is live, refreshes
-  mutable PGID routing across detachment, and kills still-matching tracked processes on
-  every exit. It signals a descendant group only when its current leader is also owned.
-  After 5s, forced escalation freezes pi, takes a final descendant snapshot, and
-  SIGKILLs owned descendants plus pi's group. The waiter reaps pi independently of
-  stdout EOF, drains final records for
+  SIGTERM. Gibson tracks descendant ownership by PID plus a precise OS birth token,
+  stops discovery when the original pi identity disappears, refreshes mutable PGID
+  routing across detachment, and revalidates before every signal. Linux uses pidfds for
+  individual signals when available. It signals a descendant group only with a current
+  owned witness. After 5s, forced escalation freezes pi, takes a final descendant
+  snapshot, and SIGKILLs owned descendants plus pi's group. The waiter reaps pi
+  independently of stdout EOF, drains final records for
   up to 500ms, then closes the owned pipe so inherited descriptors cannot hang
   completion. Registry → `closed`
   (user close) or `stopped` (server shutdown). Unexpected pi exit: registry → `stopped`,

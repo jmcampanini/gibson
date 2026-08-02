@@ -234,9 +234,10 @@ pi exit, and repeated cleanup without expanding it into a sustained conversation
   a command times out.
 - [x] Isolate pi from Gibson's terminal process group so Ctrl+C reaches Gibson without
   preempting the durable RPC abort.
-- [x] Track pi descendants while pi is live by PID/start identity across reparenting and
-  process-group changes, clean tracked ownership on unexpected exit, and make close
-  idempotent with full owned-process-tree SIGKILL only after the graceful timeout.
+- [x] Track pi descendants by PID plus a precise OS birth token across reparenting and
+  process-group changes, stop discovery when the original pi identity disappears,
+  revalidate before signaling, clean tracked ownership on unexpected exit, and make
+  close idempotent with full owned-process-tree SIGKILL only after the graceful timeout.
 - [x] Reap pi independently of stdout EOF, bound the final stdout drain, and guarantee
   shutdown can unblock inherited descriptors or a full event channel while preserving
   deterministic completion and channel-close ordering.

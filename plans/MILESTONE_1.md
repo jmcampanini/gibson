@@ -217,11 +217,14 @@ Consumers therefore see `range Events()` end and can then read a fully-populated
 `ExitErr()`.
 
 A lightweight process tracker snapshots pi descendants while pi is live and retains
-PID/start-time ownership identities after reparenting. PGID is mutable routing data: it
-is refreshed while the PID/start identity still matches and is not required for an
-individual kill. Whole-group signaling requires a still-owned matching group leader,
-limiting both PID-reuse and unrelated-group risk. The reaper kills matched tracked
-groups/processes on every exit path before publishing completion.
+PID plus precise OS birth-token ownership identities after reparenting. Darwin uses the
+kernel start timeval; Linux uses `/proc` start ticks and pidfds for individual signals
+when supported. Discovery stops permanently when the original pi birth token disappears,
+so a recycled root PID cannot contribute descendants. PGID is mutable routing data: it
+is refreshed while PID/birth identity still matches and is not required for an individual
+kill. Every signal revalidates identity; whole-group signaling additionally requires a
+still-owned matching group leader or member of pi's extant original group. The reaper
+kills matched tracked groups/processes on every exit path before publishing completion.
 
 - `Close(ctx)`: mark closing (unsticks pump sends), signal pi's dedicated process group
   with SIGTERM, and wait up to 5s. Forced escalation freezes pi, takes a final descendant

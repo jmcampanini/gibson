@@ -1,7 +1,6 @@
 package pisession
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,8 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -114,7 +111,15 @@ func Spawn(ctx context.Context, cfg Config) (*Session, error) {
 	if logger == nil {
 		logger = log.New(io.Discard)
 	}
-	processes := newOwnedProcessTracker(cmd.Process.Pid)
+	processes, err := newOwnedProcessTracker(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = cmd.Wait()
+		_ = stderr.Close()
+		return nil, fmt.Errorf("identify pi process: %w", err)
+	}
 	session := &Session{
 		id:               cfg.SessionID,
 		pid:              cmd.Process.Pid,
@@ -289,7 +294,7 @@ func (s *Session) shutdown() {
 	default:
 	}
 
-	if err := signalProcessGroup(s.pid, syscall.SIGTERM); err != nil {
+	if err := s.signalRootProcessGroup(syscall.SIGTERM); err != nil {
 		s.setShutdownError(fmt.Errorf("signal pi process group with SIGTERM: %w", err))
 		s.kill()
 		<-s.complete
@@ -325,6 +330,13 @@ func (s *Session) kill() {
 	if err := s.processes.killTree(); err != nil {
 		s.setShutdownError(fmt.Errorf("kill pi process tree with SIGKILL: %w", err))
 	}
+}
+
+func (s *Session) signalRootProcessGroup(signal syscall.Signal) error {
+	if s.processes == nil {
+		return signalProcessGroup(s.pid, signal)
+	}
+	return s.processes.signalRootProcessGroup(signal)
 }
 
 func (s *Session) setShutdownError(err error) {
@@ -364,7 +376,6 @@ func (s *Session) reap() {
 	s.exitErr = waitErr
 	s.exitMu.Unlock()
 
-	_ = signalProcessGroup(s.pid, syscall.SIGKILL)
 	timer := time.NewTimer(stdoutDrainTimeout)
 	select {
 	case <-s.rpc.pumpDone:
@@ -413,8 +424,14 @@ type processRecord struct {
 	started string
 }
 
+type processListFunc func() ([]processRecord, error)
+type processReadFunc func(int) (processRecord, bool, error)
+
 type ownedProcessTracker struct {
-	rootPID  int
+	root     processRecord
+	rootGone bool
+	list     processListFunc
+	read     processReadFunc
 	mu       sync.Mutex
 	owned    map[int]processRecord
 	stopOnce sync.Once
@@ -422,13 +439,26 @@ type ownedProcessTracker struct {
 	done     chan struct{}
 }
 
-func newOwnedProcessTracker(rootPID int) *ownedProcessTracker {
-	return &ownedProcessTracker{
-		rootPID: rootPID,
-		owned:   make(map[int]processRecord),
-		stopCh:  make(chan struct{}),
-		done:    make(chan struct{}),
+func newOwnedProcessTracker(rootPID int) (*ownedProcessTracker, error) {
+	return newOwnedProcessTrackerWith(rootPID, listProcesses, readProcessRecord)
+}
+
+func newOwnedProcessTrackerWith(rootPID int, list processListFunc, read processReadFunc) (*ownedProcessTracker, error) {
+	root, exists, err := read(rootPID)
+	if err != nil {
+		return nil, err
 	}
+	if !exists {
+		return nil, fmt.Errorf("process %d exited before ownership was recorded", rootPID)
+	}
+	return &ownedProcessTracker{
+		root:   root,
+		list:   list,
+		read:   read,
+		owned:  make(map[int]processRecord),
+		stopCh: make(chan struct{}),
+		done:   make(chan struct{}),
+	}, nil
 }
 
 func (t *ownedProcessTracker) run() {
@@ -451,16 +481,31 @@ func (t *ownedProcessTracker) stop() {
 }
 
 func (t *ownedProcessTracker) capture() error {
-	records, err := listProcesses()
+	records, err := t.list()
 	if err != nil {
 		return err
 	}
-	descendants := descendantsOf(t.rootPID, records)
 	current := make(map[int]processRecord, len(records))
 	for _, record := range records {
 		current[record.pid] = record
 	}
+
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	var identityErr error
+	discover := false
+	if !t.rootGone {
+		snapshotRoot, inSnapshot := current[t.root.pid]
+		liveRoot, exists, err := t.read(t.root.pid)
+		if err != nil {
+			identityErr = err
+		}
+		if err != nil || !inSnapshot || !exists || snapshotRoot.started != t.root.started || liveRoot.started != t.root.started {
+			t.rootGone = true
+		} else {
+			discover = true
+		}
+	}
 	for pid, tracked := range t.owned {
 		record, ok := current[pid]
 		if !ok || record.started != tracked.started {
@@ -469,24 +514,42 @@ func (t *ownedProcessTracker) capture() error {
 		}
 		t.owned[pid] = record
 	}
-	for _, record := range descendants {
-		t.owned[record.pid] = record
+	if discover {
+		for _, record := range descendantsOf(t.root.pid, records) {
+			t.owned[record.pid] = record
+		}
 	}
-	t.mu.Unlock()
+	return identityErr
+}
+
+func (t *ownedProcessTracker) signalRootProcessGroup(signal syscall.Signal) error {
+	current, exists, err := t.read(t.root.pid)
+	if err != nil || !exists || current.started != t.root.started {
+		return err
+	}
+	if current.pgid != t.root.pid {
+		if err := signalProcessIfOwned(t.root, signal); err != nil {
+			return fmt.Errorf("signal root process %d in group %d: %w", t.root.pid, current.pgid, err)
+		}
+		return nil
+	}
+	if err := signalProcessGroup(t.root.pid, signal); err != nil {
+		return fmt.Errorf("signal root group %d: %w", t.root.pid, err)
+	}
 	return nil
 }
 
 func (t *ownedProcessTracker) killTree() error {
 	var result error
-	if err := signalProcessGroup(t.rootPID, syscall.SIGSTOP); err != nil {
+	if err := t.signalRootProcessGroup(syscall.SIGSTOP); err != nil {
 		result = errors.Join(result, fmt.Errorf("stop root process group: %w", err))
 	}
 	if err := t.capture(); err != nil {
 		result = errors.Join(result, err)
 	}
 	result = errors.Join(result, t.killTracked())
-	if err := signalProcessGroup(t.rootPID, syscall.SIGKILL); err != nil {
-		result = errors.Join(result, fmt.Errorf("kill root process group: %w", err))
+	if err := signalProcessIfOwned(t.root, syscall.SIGKILL); err != nil {
+		result = errors.Join(result, fmt.Errorf("kill root process: %w", err))
 	}
 	return result
 }
@@ -502,7 +565,7 @@ func (t *ownedProcessTracker) killTracked() error {
 		return nil
 	}
 
-	records, err := listProcesses()
+	records, err := t.list()
 	if err != nil {
 		return err
 	}
@@ -517,11 +580,15 @@ func (t *ownedProcessTracker) killTracked() error {
 		}
 	}
 
-	groups := make(map[int]bool)
+	groups := make(map[int]processRecord)
 	for _, record := range matched {
+		if record.pgid == t.root.pid {
+			groups[record.pgid] = record
+			continue
+		}
 		leader, leaderOwned := matched[record.pgid]
-		if record.pgid != t.rootPID && leaderOwned && leader.pid == leader.pgid {
-			groups[record.pgid] = true
+		if leaderOwned && leader.pid == leader.pgid {
+			groups[record.pgid] = leader
 		}
 	}
 	groupIDs := make([]int, 0, len(groups))
@@ -531,44 +598,25 @@ func (t *ownedProcessTracker) killTracked() error {
 	sort.Ints(groupIDs)
 	var result error
 	for _, pgid := range groupIDs {
+		witness := groups[pgid]
+		currentWitness, exists, err := t.read(witness.pid)
+		if err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		if !exists || currentWitness.started != witness.started || currentWitness.pgid != pgid {
+			continue
+		}
 		if err := signalProcessGroup(pgid, syscall.SIGKILL); err != nil {
 			result = errors.Join(result, fmt.Errorf("kill descendant process group %d: %w", pgid, err))
 		}
 	}
-	for pid := range matched {
-		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	for pid, record := range matched {
+		if err := signalProcessIfOwned(record, syscall.SIGKILL); err != nil {
 			result = errors.Join(result, fmt.Errorf("kill descendant process %d: %w", pid, err))
 		}
 	}
 	return result
-}
-
-func listProcesses() ([]processRecord, error) {
-	output, err := exec.Command("/bin/ps", "-axo", "pid=,ppid=,pgid=,lstart=").Output()
-	if err != nil {
-		return nil, fmt.Errorf("list process tree: %w", err)
-	}
-	lines := bytes.Split(output, []byte{'\n'})
-	records := make([]processRecord, 0, len(lines))
-	for _, line := range lines {
-		fields := strings.Fields(string(line))
-		if len(fields) < 4 {
-			continue
-		}
-		pid, pidErr := strconv.Atoi(fields[0])
-		ppid, ppidErr := strconv.Atoi(fields[1])
-		pgid, pgidErr := strconv.Atoi(fields[2])
-		if pidErr != nil || ppidErr != nil || pgidErr != nil {
-			continue
-		}
-		records = append(records, processRecord{
-			pid:     pid,
-			ppid:    ppid,
-			pgid:    pgid,
-			started: strings.Join(fields[3:], " "),
-		})
-	}
-	return records, nil
 }
 
 func descendantsOf(rootPID int, records []processRecord) []processRecord {

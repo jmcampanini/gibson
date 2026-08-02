@@ -336,6 +336,38 @@ func TestSessionCloseEscalatesAfterGrace(t *testing.T) {
 	assert.Equal(t, syscall.SIGKILL, status.Signal())
 }
 
+func TestOwnedProcessTrackerRejectsReusedRootAndDescendantPIDs(t *testing.T) {
+	records := []processRecord{
+		{pid: 100, ppid: 1, pgid: 100, started: "root-original"},
+		{pid: 101, ppid: 100, pgid: 100, started: "child-original"},
+	}
+	list := func() ([]processRecord, error) {
+		return append([]processRecord(nil), records...), nil
+	}
+	read := func(pid int) (processRecord, bool, error) {
+		for _, record := range records {
+			if record.pid == pid {
+				return record, true, nil
+			}
+		}
+		return processRecord{}, false, nil
+	}
+	tracker, err := newOwnedProcessTrackerWith(100, list, read)
+	require.NoError(t, err)
+	require.NoError(t, tracker.capture())
+	require.Contains(t, tracker.owned, 101)
+
+	records = []processRecord{
+		{pid: 100, ppid: 1, pgid: 100, started: "root-reused"},
+		{pid: 101, ppid: 200, pgid: 200, started: "child-reused"},
+		{pid: 102, ppid: 100, pgid: 100, started: "unrelated-child"},
+	}
+	require.NoError(t, tracker.capture())
+	assert.True(t, tracker.rootGone)
+	assert.NotContains(t, tracker.owned, 101)
+	assert.NotContains(t, tracker.owned, 102)
+}
+
 func TestSessionForcedCloseKillsDetachedDescendants(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "detached.pid")
 	script := fmt.Sprintf(
@@ -526,7 +558,8 @@ func startLifecycleProcessHoldingStdout(t testing.TB, script string) (*Session, 
 	require.NoError(t, cmd.Start())
 
 	logger := log.New(bytes.NewBuffer(nil))
-	processes := newOwnedProcessTracker(cmd.Process.Pid)
+	processes, err := newOwnedProcessTracker(cmd.Process.Pid)
+	require.NoError(t, err)
 	session := &Session{
 		id:               "lifecycle-test",
 		pid:              cmd.Process.Pid,
