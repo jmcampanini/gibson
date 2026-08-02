@@ -93,6 +93,67 @@ cli-proof: ## Build and verify the compiled CLI contract.
 	test "$$unknown_rc" -eq 1; \
 	test "$$(printf '%s\n' "$$unknown_output" | wc -l | tr -d ' ')" -eq 1; \
 	case "$$unknown_output" in 'gibson: error: '*'configured types: quick'*) ;; *) echo "unknown type error did not list configured types" >&2; exit 1;; esac; \
+	FAKEPI_SCENARIO=slow_stream python3 -c 'import os, sys; os.setpgid(0, 0); os.execv(sys.argv[1], sys.argv[1:])' "$$gibson" run quick 'Stream until interrupted' >"$$sandbox/interrupt.stdout" 2>"$$sandbox/interrupt.stderr" & \
+	interrupt_pid=$$!; \
+	for attempt in $$(seq 1 100); do \
+		if test -s "$$sandbox/interrupt.stdout"; then break; fi; \
+		kill -0 "$$interrupt_pid" 2>/dev/null || { echo "interrupt proof exited before streaming" >&2; exit 1; }; \
+		sleep 0.02; \
+	done; \
+	test -s "$$sandbox/interrupt.stdout"; \
+	python3 -c 'import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGINT)' "$$interrupt_pid"; \
+	if wait "$$interrupt_pid"; then interrupt_rc=0; else interrupt_rc=$$?; fi; \
+	test "$$interrupt_rc" -eq 130; \
+	grep -Fq '"stopReason":"aborted"' .gibson/sessions/*.jsonl; \
+	python3 -c "import json; d=json.load(open('.gibson/state.json')); assert all(s['status']=='stopped' and s['pid']==0 for s in d['sessions'].values())"; \
+	if pgrep -f "$$PWD/.gibson/sessions" >/dev/null; then \
+		echo "first interrupt left an orphan" >&2; exit 1; \
+	else \
+		pgrep_rc=$$?; test "$$pgrep_rc" -eq 1 || { echo "first interrupt orphan check failed" >&2; exit "$$pgrep_rc"; }; \
+	fi; \
+	printf 'FIRST_INTERRUPT_EXIT=%s\n' "$$interrupt_rc"; \
+	printf 'FIRST_INTERRUPT_STDOUT='; tr '\n' ' ' <"$$sandbox/interrupt.stdout"; printf '\n'; \
+	printf '%s\n' 'FIRST_INTERRUPT_PROCESS_GROUP=true' 'FIRST_INTERRUPT_ABORTED_ENTRY=true' 'FIRST_INTERRUPT_ORPHANS=0' 'FIRST_INTERRUPT_REGISTRY=stopped,pid=0'; \
+	FAKEPI_SCENARIO=slow_stream python3 -c 'import os, sys; os.setpgid(0, 0); os.execv(sys.argv[1], sys.argv[1:])' "$$gibson" run quick 'Force shutdown' >"$$sandbox/force.stdout" 2>"$$sandbox/force.stderr" & \
+	force_pid=$$!; \
+	for attempt in $$(seq 1 100); do \
+		pi_pid="$$(python3 -c "import json; d=json.load(open('.gibson/state.json')); print(next((s['pid'] for s in d['sessions'].values() if s['status']=='live'), ''))")"; \
+		if test -n "$$pi_pid" && test -s "$$sandbox/force.stdout"; then break; fi; \
+		kill -0 "$$force_pid" 2>/dev/null || { echo "force proof exited before streaming" >&2; exit 1; }; \
+		sleep 0.02; \
+	done; \
+	test -n "$$pi_pid"; \
+	kill -STOP "$$pi_pid"; \
+	python3 -c 'import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGINT)' "$$force_pid"; \
+	sleep 0.1; \
+	force_started="$$(python3 -c 'import time; print(time.monotonic())')"; \
+	python3 -c 'import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGINT)' "$$force_pid"; \
+	if wait "$$force_pid"; then force_rc=0; else force_rc=$$?; fi; \
+	force_finished="$$(python3 -c 'import time; print(time.monotonic())')"; \
+	python3 -c 'import sys; elapsed = float(sys.argv[1]) - float(sys.argv[2]); assert elapsed < 5, f"second interrupt took {elapsed:.3f}s"' "$$force_finished" "$$force_started"; \
+	test "$$force_rc" -eq 130; \
+	if kill -0 "$$pi_pid" 2>/dev/null; then echo "second interrupt left pi alive" >&2; kill -KILL "$$pi_pid"; exit 1; fi; \
+	python3 -c "import json; d=json.load(open('.gibson/state.json')); assert all(s['status']=='stopped' and s['pid']==0 for s in d['sessions'].values())"; \
+	printf 'SECOND_INTERRUPT_EXIT=%s\n' "$$force_rc"; \
+	printf '%s\n' 'SECOND_INTERRUPT_PROMPT=true' 'SECOND_INTERRUPT_ORPHANS=0' 'SECOND_INTERRUPT_REGISTRY=stopped,pid=0'; \
+	if FAKEPI_SCENARIO=crash_mid_stream "$$gibson" run quick 'Crash now' >"$$sandbox/crash.stdout" 2>"$$sandbox/crash.stderr"; then \
+		echo "expected crash scenario to fail" >&2; \
+		exit 1; \
+	else \
+		crash_rc=$$?; \
+	fi; \
+	test "$$crash_rc" -eq 1; \
+	grep -Fq 'Partial output before crash.' "$$sandbox/crash.stdout"; \
+	grep -Fq 'deterministic crash after first delta' "$$sandbox/crash.stderr"; \
+	python3 -c "import json; d=json.load(open('.gibson/state.json')); assert all(s['status']=='stopped' and s['pid']==0 for s in d['sessions'].values())"; \
+	if pgrep -f "$$PWD/.gibson/sessions" >/dev/null; then \
+		echo "crash left an orphan" >&2; exit 1; \
+	else \
+		pgrep_rc=$$?; test "$$pgrep_rc" -eq 1 || { echo "crash orphan check failed" >&2; exit "$$pgrep_rc"; }; \
+	fi; \
+	printf 'CRASH_EXIT=%s\n' "$$crash_rc"; \
+	printf 'CRASH_STDOUT='; tr '\n' ' ' <"$$sandbox/crash.stdout"; printf '\n'; \
+	printf '%s\n' 'CRASH_STDERR_TAIL=preserved' 'CRASH_ORPHANS=0' 'CRASH_REGISTRY=stopped,pid=0'; \
 	printf '%s\n' 'GIBSON_CLI_PROOF=PASS'
 
 lint: ## Run golangci-lint.

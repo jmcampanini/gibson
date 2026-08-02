@@ -40,7 +40,7 @@ plan. Known planning inconsistencies are recorded in
 - [x] Chunk 2 — Correct RPC transport and launch arguments
 - [x] Chunk 3 — Basic live pi session
 - [x] Chunk 4 — First human-drivable run
-- [ ] Chunk 5 — Interruptible and crash-safe runs
+- [x] Chunk 5 — Interruptible and crash-safe runs
 - [ ] Chunk 6 — Named-checkout runs and storage hardening
 - [ ] Chunk 7 — Hostile records and extension boundaries
 - [ ] Chunk 8 — Complete M1 acceptance
@@ -213,7 +213,7 @@ Chunks 1–3.
 
 ### Mandatory approval gate
 
-- [ ] Present the compiled one-shot command, its artifacts, and verification evidence, then
+- [x] Present the compiled one-shot command, its artifacts, and verification evidence, then
   receive explicit approval before beginning Chunk 5.
 
 ## Chunk 5 — Interruptible and crash-safe runs
@@ -223,22 +223,37 @@ Chunks 1–3.
 Make the one-shot command trustworthy during slow work, repeated interruption, unexpected
 pi exit, and repeated cleanup without expanding it into a sustained conversation.
 
-- [ ] Add slow-stream and crash fake-pi scenarios that exercise real subprocess timing and
+- [x] Add slow-stream and crash fake-pi scenarios that exercise real subprocess timing and
   failure boundaries.
-- [ ] Replace Chunk 4's context-only interrupt trigger with signal-aware input while
+- [x] Replace Chunk 4's context-only interrupt trigger with signal-aware input while
   keeping caller context cancellation as a separate shutdown path.
-- [ ] On the first interrupt, send `abort`, keep draining until the aborted assistant
+- [x] On the first interrupt, send `abort`, keep draining until the aborted assistant
   message is durable and the agent settles, then stop and exit 130.
-- [ ] On a second interrupt, force immediate shutdown and exit 130.
-- [ ] Fail pending commands consistently when pi exits or a command times out.
-- [ ] Make close idempotent and escalate from SIGTERM to SIGKILL only after the graceful
-  timeout.
-- [ ] Guarantee shutdown can unblock a full event channel while preserving deterministic
-  pump, reap, completion, and channel-close ordering.
-- [ ] Preserve useful pi stderr diagnostics on crashes and clear the registry PID on every
+- [x] On a second interrupt, force immediate shutdown and exit 130.
+- [x] Fail pending commands consistently when pi exits, either RPC direction closes, or
+  a command times out.
+- [x] Isolate pi from Gibson's terminal process group so Ctrl+C reaches Gibson without
+  preempting the durable RPC abort.
+- [x] Track pi descendants by PID plus a precise OS birth token across reparenting and
+  process-group changes, validate every live ancestry edge before adoption, stop discovery
+  when the original pi identity disappears, revalidate before signaling, clean tracked
+  ownership on unexpected exit, and make close idempotent with full owned-process-tree
+  SIGKILL only after the graceful timeout.
+- [x] Reap pi independently of stdout EOF, bound the final stdout drain, and guarantee
+  shutdown can unblock inherited descriptors or a full event channel while preserving
+  deterministic completion and channel-close ordering.
+- [x] Preserve useful pi stderr diagnostics on crashes and clear the registry PID on every
   normal, aborted, forced, or failed exit path.
-- [ ] Preserve exit 130 when interrupt cleanup adds shutdown or registry diagnostics, and
+- [x] Preserve exit 130 when interrupt cleanup adds shutdown or registry diagnostics, and
   attempt stopped-status/PID cleanup after either graceful or forced process termination.
+
+Every outbound RPC write has a 30-second bound. Ordinary commands keep one 30-second
+budget across enqueue, write, and response; a prompt keeps the write bound but may wait
+without a transport response deadline until caller cancellation, process exit, transport
+closure, or acceptance. The typed session method selects this policy rather than making
+the transport branch on command names. A write timeout is fatal to the transport and
+fails all pending commands consistently. D-017 retains the remaining conventions,
+upstream-disposition, and M2 plan-gate reconciliation.
 
 ### Dependencies
 
@@ -246,15 +261,27 @@ Chunks 1–4, including the complete one-shot application workflow and storage l
 
 ### Verification criteria
 
-- [ ] A first interrupt stops further deltas, persists an assistant entry with
+- [x] A first interrupt stops further deltas, persists an assistant entry with
   `stopReason:"aborted"`, reaches `agent_settled`, exits 130, and leaves no orphan.
-- [ ] A second interrupt forces prompt shutdown, exits 130, clears the PID, and leaves no
-  orphan; cleanup failures remain visible without reclassifying the interrupt as exit 1.
-- [ ] A crash exits 1, fails pending work, records final exit information, closes event
-  delivery last, preserves a useful stderr tail, and leaves stopped registry state.
-- [ ] Repeated close calls neither leak, double-reap, nor corrupt completion state.
-- [ ] Slow, crashed, and interrupted runs keep stdout and stderr within their contracts.
-- [ ] `make check` passes, including repeated, shuffled, and race-enabled lifecycle tests.
+- [x] Terminal Ctrl+C reaches Gibson but not pi, allowing the first interrupt to persist
+  the aborted entry before shutdown.
+- [x] A second interrupt kills pi and its active tool descendants promptly, exits 130,
+  clears the PID, and leaves no orphan; cleanup failures remain visible without
+  reclassifying the interrupt as exit 1.
+- [x] A crash exits 1, kills tracked detached descendants, fails pending work, records
+  final exit information, bounds stdout drain when a descriptor remains open, closes
+  event delivery last, preserves a useful stderr tail, and leaves stopped registry state.
+- [x] Repeated close calls neither leak, double-reap, nor corrupt completion state.
+- [x] Slow, crashed, and interrupted runs keep stdout and stderr within their contracts.
+- [x] `make check` passes, including repeated, shuffled, and race-enabled lifecycle tests.
+
+### Human proof
+
+- [x] Run `make cli-proof` from `~/Code/github.com/jmcampanini/gibson/main`; require
+  its compiled-binary first-interrupt, second-interrupt, and crash evidence to end in
+  `GIBSON_CLI_PROOF=PASS`.
+- [x] Capture that command and its verbatim output in
+  `.sandbox/demos/m1-chunk-5.html`.
 
 ### Mandatory approval gate
 
@@ -371,6 +398,26 @@ that prevent the already-specified behavior from passing.
 - [ ] Remove Chunk 4's transitional interrupt paths and obsolete scripted-session test
   scaffolding; retain its narrow session interface only if it still represents a genuine
   production boundary after the final fake-pi scenarios land.
+
+### Review cleanup carried into M1 completion
+
+At this step, revalidate each final post-Chunk-5 review finding against the completed M1
+workflow. Fix it at its faithful owner or record an explicit later-milestone disposition;
+do not silently drop it and do not pull unrelated HTTP or browser scope forward.
+
+- [ ] Make pre-prompt startup interruption coherent: no prompt or tool work begins after a
+  buffered SIGINT, startup cancellation maps to exit 130, and a second interrupt can force
+  a stalled readiness/version path.
+- [ ] Harden Linux process-disappearance handling: treat `ESRCH` as not-exists, prevent
+  unrelated per-PID churn from aborting the whole cleanup scan, and do not permanently
+  latch root disappearance from a transient identity-read error.
+- [ ] Decide and prove the maximum single-interrupt wait when pi accepts an abort write but
+  never responds, preserving the durable-abort preference and immediate second-interrupt
+  escape hatch.
+- [ ] Narrow `GetEntries` cursor classification so only pi's actual missing-entry response
+  becomes `ErrInvalidCursor`; preserve unrelated command failures for future consumers.
+- [ ] Preserve useful diagnostics when cancellation races another failure while retaining
+  exit 130, and avoid presenting an empty session-file field before pi reports the path.
 
 ### Dependencies
 

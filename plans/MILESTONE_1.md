@@ -41,7 +41,7 @@ New files (repo-relative):
 - `internal/pisession/session.go` — `Config`, `Spawn()`, `Session` (process lifecycle,
   typed command methods, `Events()`, `Close`), stderr capture.
 - `internal/pisession/errors.go` — `ErrInvalidCursor`, `ErrProcessExited`,
-  `ErrCommandTimeout`.
+  `ErrTransportClosed`, `ErrCommandTimeout`.
 - `internal/pisession/rpc_test.go`, `argv_test.go`, `session_test.go` (fakepi),
   `session_realpi_test.go` (gated).
 - `internal/store/store.go` — `.gibson/` layout creation and path helpers (SPEC §4.1).
@@ -110,12 +110,15 @@ JSON object + `\n`.
 - Every command gets `id: "c-<n>"` from a per-process atomic counter. A mutex-guarded
   `map[string]chan json.RawMessage` resolves replies. Per rpc.md, pi echoes `id` on the
   matching `{"type":"response","command":...,"success":...}` line.
-- Default timeout 30s per command (tighter caller ctx wins): on timeout the id is removed
-  from the map and `ErrCommandTimeout` returned; a late response then arrives unmatched
-  and is logged + dropped. The `prompt` command family temporarily remains pending until
-  caller cancellation, process exit, transport closure, or a response so pre-acceptance
-  extension dialogs can wait as required; D-017 owns the final write/response timeout
-  split and cross-milestone contract.
+- Every outbound write has a 30s bound. Ordinary commands use one 30s budget across
+  enqueue, write, and response (a tighter caller context wins): on a response timeout the
+  id is removed, `ErrCommandTimeout` is returned, and a late response is logged and
+  dropped. Prompt submission keeps the write bound but its response remains pending until
+  caller cancellation, process exit, transport closure, or acceptance so pre-acceptance
+  extension dialogs can wait. A write timeout or terminal output read is fatal to the
+  transport, closes stdin, and fails every pending command. The session method selects
+  this policy; D-017 owns its conventions,
+  upstream-disposition, and M2 plan-gate reconciliation.
 - `success:false` responses resolve the waiter with an error wrapping pi's `error` string.
   rpc.md note: pi parse errors come back as `{"type":"response","command":"parse",
   "success":false,...}` with no id — unmatched, logged at error level (it indicates a
@@ -178,10 +181,12 @@ checkout; environment inherited; `pi_bin` from config else `exec.LookPath("pi")`
 `--name` is never passed — display names go through `set_session_name` (conventions §5);
 `gibson run` has no name flag (conventions §1 CLI tree) so it skips that step entirely.
 
-Spawn sequence (conventions §6): start process (stderr already wired to the log file,
-§4.7) → start pump/writer/waiter goroutines → `get_state` as readiness probe (proves the
-process is up and protocol-speaking; its response includes `sessionId`, `isStreaming`,
-`sessionFile` per rpc.md) → return the live `Session`. The caller then issues `prompt`.
+Spawn sequence (conventions §6): start pi in a dedicated process group so terminal
+signals sent to Gibson's foreground group cannot preempt RPC abort; stderr is already
+wired to the log file (§4.7). Then start pump/writer/waiter goroutines → `get_state` as
+readiness probe (proves the process is up and protocol-speaking; its response includes
+`sessionId`, `isStreaming`, `sessionFile` per rpc.md) → return the live `Session`. The
+caller then issues `prompt`.
 Per rpc.md, the `prompt` response means **accepted/queued, not completed** — completion
 is observed via events; and `streamingBehavior` (`"steer"`|`"followUp"`) is REQUIRED if
 the agent is already streaming, otherwise the command errors. `Prompt(ctx, msg, behavior)`
@@ -200,16 +205,34 @@ filename. `store.Store` (already rooted at one checkout, §4.8) exposes
 
 ### 4.6 Shutdown, abort, unexpected exit (SPEC §5.2, conventions §6)
 
-Goroutine topology per Session: writer, stdout pump, waiter. Reap ordering rule: the
-waiter calls `cmd.Wait()` only after the pump has exited on EOF/read-error (avoids the
-`StdoutPipe`+`Wait` race), then, in order: records the exit error, fails all pending
-command waiters with `ErrProcessExited`, zeroes/clears the pending map, closes the
-stderr log file, closes `done`, and finally closes the events channel. Consumers
-therefore see `range Events()` end and can then read a fully-populated `ExitErr()`.
+Goroutine topology per Session: writer, stdout pump, waiter. Pi stdout uses an explicitly
+owned `os.Pipe`, not `StdoutPipe`, so the waiter calls `cmd.Wait()` independently of EOF
+without racing `exec.Cmd`'s pipe cleanup. After process exit it records the exit error,
+allows up to 500ms for buffered final records to drain, then closes the owned reader to
+unblock a descriptor inherited by a helper. Process exit fails pending command waiters;
+a terminal output read independently fails them with `ErrTransportClosed` and closes
+stdin so a still-live but unusable pi can be reaped. Cleanup zeroes/clears the pending
+map, closes the stderr log file, closes `done`, and finally closes the events channel.
+Consumers therefore see `range Events()` end and can then read a fully-populated
+`ExitErr()`.
 
-- `Close(ctx)`: mark closing (unsticks pump sends), SIGTERM → wait up to 5s → SIGKILL;
-  the kill closes pi's stdout → pump EOF → waiter reaps. Graceful pi exit under SIGTERM
-  is status 143 (SPEC §5.2.2). Idempotent.
+A lightweight process tracker snapshots pi descendants while pi is live and retains
+PID plus precise OS birth-token ownership identities after reparenting. Darwin uses the
+kernel start timeval; Linux uses `/proc` start ticks and pidfds for individual signals
+when supported. Because Linux enumeration is per PID, each new candidate's complete
+PID/birth-token/PPID chain is re-read root-to-leaf before adoption, rejecting mixed-time
+snapshots. Discovery stops permanently when the original pi birth token disappears, so
+a recycled root PID cannot contribute descendants. PGID is mutable routing data: it
+is refreshed while PID/birth identity still matches and is not required for an individual
+kill. Every signal revalidates identity; whole-group signaling additionally requires a
+still-owned matching group leader or member of pi's extant original group. The reaper
+kills matched tracked groups/processes on every exit path before publishing completion.
+
+- `Close(ctx)`: mark closing (unsticks pump sends), signal pi's dedicated process group
+  with SIGTERM, and wait up to 5s. Forced escalation freezes pi, takes a final descendant
+  snapshot, SIGKILLs owned descendant groups/processes and pi's group, then reaps. This
+  covers pi's detached tool process groups when pi cannot run its own SIGTERM cleanup
+  handler. Graceful pi exit under SIGTERM is status 143 (SPEC §5.2.2). Idempotent.
 - `Abort(ctx)`: sends the `abort` command; pi replies `success:true` and the aborted
   assistant message carries `stopReason:"aborted"` (SPEC §6.2, rpc.md). Abort does NOT
   terminate the process — the caller keeps consuming events until `agent_settled`.
@@ -407,14 +430,15 @@ than `go test`.
 4. `internal/pisession/event.go`, `errors.go`, `rpc.go` — transport core + unit tests
    (`rpc_test.go`) against in-memory pipes: framing table (chunked writes, `\r\n`,
    embedded U+2028/U+2029, >1MB line, EOF without trailing `\n`), correlation
-   (in-order/out-of-order replies, timeout, unmatched response dropped, `success:false`
-   error surface), write serialization under concurrent commands.
+   (in-order/out-of-order replies, timeout, terminal output closure, unmatched response
+   dropped, `success:false` error surface), write serialization under concurrent commands.
 5. `internal/pisession/argv.go` + `argv_test.go` — assembly table per §4.5
    (model/thinking present/absent, `extra_args` verbatim and last).
 6. `internal/pisession/session.go` — `Config`, `Spawn`, lifecycle per §4.5–§4.7;
    `session_test.go` against fakepi: spawn+probe, prompt→settled event stream, abort
    mid-`slow_stream`, `huge_entry`, `crash_mid_stream` (pending command gets
-   `ErrProcessExited`, `Done` fires, events channel closes last), `dialog_confirm` via
+   `ErrTransportClosed` when output EOF wins, `Done` fires, events channel closes last),
+   `dialog_confirm` via
    `RespondUI`, stderr capture file contents, `GetEntries` since-cursor + invalid cursor
    → `ErrInvalidCursor`, `Close` idempotence and 143 exit.
 7. `internal/store/` — `store.go`, `id.go`, `registry.go` + tests: id format/regex/
@@ -447,6 +471,9 @@ here so later plans may rely on them):
 - `pisession.Session` methods:
   - `Prompt(ctx, message, behavior string) error` (`behavior` ∈ `""|"steer"|"followUp"`,
     maps to `streamingBehavior`)
+  - `StartPrompt(ctx, message, behavior string) (<-chan error, error)` writes the same
+    prompt before returning its buffered acceptance-result channel, so signal handling can
+    order `abort` after prompt submission while continuing to drain events
   - `Abort(ctx) error`
   - `GetState(ctx) (json.RawMessage, error)` (response `data` verbatim)
   - `GetEntries(ctx, since string) (entries []json.RawMessage, leafID string, err error)`
@@ -462,7 +489,8 @@ here so later plans may rely on them):
     recorded)
   - `Close(ctx) error` (SIGTERM→5s→SIGKILL), `Done() <-chan struct{}`,
     `ExitErr() error`, `PID() int`, `ID() string`
-- `pisession.ErrInvalidCursor`, `ErrProcessExited`, `ErrCommandTimeout`;
+- `pisession.ErrInvalidCursor`, `ErrProcessExited`, `ErrTransportClosed`,
+  `ErrCommandTimeout`;
   `pisession.ResolvePiBin(configured string) (string, error)` and
   `pisession.CheckPiVersion(ctx, bin) (VersionResult, error)` reused by `run`, with
   minimum/verified/newer behavior from §2.
@@ -504,14 +532,36 @@ fakepi integration (default run):
   contents.
 - Abort mid-`slow_stream`: stream stops, `stopReason:"aborted"` entry lands,
   `agent_settled` arrives, `Close` reaps cleanly.
-- `crash_mid_stream`: pending command errors `ErrProcessExited`; `Done` then channel
-  close ordering; stderr log captured.
+- `crash_mid_stream`: pending command errors `ErrTransportClosed` when stdout EOF wins
+  process observation; `Done` then channel close ordering; stderr log captured.
 - `dialog_confirm`: `RespondUI` releases the block (write path for M5).
 - `internal/app` one-shot integration per step 9 of §5, including outcomes that the
   process boundary maps to exit codes 0/1/130; `cmd/run_test.go` checks adaptation only.
 
 Real-pi gated (`GIBSON_TEST_REAL_PI=1`): the no-network lifecycle and deterministic
 prompt-ordering tests of §4.12.
+
+### Final review cleanup gate
+
+Before the complete M1 acceptance run, revalidate the final post-Chunk-5 review findings
+against the assembled milestone. Each item must either be fixed at the faithful test layer
+or explicitly assigned to its owning later milestone with rationale:
+
+- Pre-prompt SIGINT: cancel stalled version/readiness work, never submit a prompt after the
+  buffered interrupt, preserve exit 130, and let a second interrupt force cleanup.
+- Linux process churn: treat `ESRCH` as process disappearance, keep one vanishing unrelated
+  `/proc` entry from aborting the whole cleanup scan, and reserve permanent `rootGone` for
+  a confirmed missing or changed root identity rather than a transient read error.
+- Wedged abort: decide and prove a bounded single-interrupt policy without weakening the
+  durable-abort path or second-interrupt force behavior.
+- Cursor semantics: map only pi's missing-entry response to `ErrInvalidCursor`, leaving
+  unrelated command failures intact before `GetEntries` gains broader consumers.
+- Interrupted diagnostics: retain useful racing errors with the exit-130 outcome and omit
+  an unknown session-file field until the path has been reported.
+
+After the cleanup dispositions, rerun `make verify`, the gated real-pi lifecycle tests,
+and the complete compiled-binary M1 proof below. The milestone cannot close on a cleanup
+change that lacks its agent-verified end-to-end evidence.
 
 ## 8. Agent-verified proof workflow
 
@@ -621,7 +671,8 @@ All steps passing is the M1 done signal.
       `get_entries` (`since` cursor; invalid → `ErrInvalidCursor`),
       `get_session_stats`, `set_session_name` all implemented per rpc.md.
 - [ ] Conventions §6 — spawn sequence (spawn → `get_state` probe → prompt), command ids
-      `c-<n>` with 30s timeout, single-goroutine writes, `ReadBytes` pump, shutdown
+      `c-<n>`, bounded writes, one 30s ordinary-command budget, unbounded prompt-response
+      waiting, single-goroutine writes, `ReadBytes` pump, and shutdown
       SIGTERM→5s→SIGKILL.
 - [ ] Conventions §7 — `pisession.Session` exports exactly the pinned method set (plus
       the M1-added names in §6 above).

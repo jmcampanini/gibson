@@ -300,6 +300,30 @@ func TestRPCCommandFailuresAndTimeouts(t *testing.T) {
 		waitFor(t, client.writerDone, "RPC writer")
 	})
 
+	t.Run("output EOF fails a pending prompt", func(t *testing.T) {
+		piOutput, writePiOutput := io.Pipe()
+		readCommands, piInput := io.Pipe()
+		client := newRPCClient(piOutput, piInput, nil)
+		client.commandTimeout = time.Second
+		result := make(chan error, 1)
+
+		go func() {
+			_, err := client.commandWithPolicy(context.Background(), "prompt", map[string]any{"message": "waiting"}, unboundedResponseWait)
+			result <- err
+		}()
+		_, err := bufio.NewReader(readCommands).ReadBytes('\n')
+		require.NoError(t, err)
+		require.NoError(t, writePiOutput.Close())
+
+		promptErr := <-result
+		require.ErrorIs(t, promptErr, ErrTransportClosed)
+		require.ErrorIs(t, promptErr, io.EOF)
+		waitFor(t, client.pumpDone, "RPC pump")
+		waitFor(t, client.writerDone, "RPC writer")
+		_, err = readCommands.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF)
+	})
+
 	t.Run("default command timeout and late response", func(t *testing.T) {
 		input, source := io.Pipe()
 		output := &synchronizedBuffer{}
@@ -339,7 +363,7 @@ func TestRPCCommandFailuresAndTimeouts(t *testing.T) {
 		result := make(chan error, 1)
 
 		go func() {
-			_, err := client.command(context.Background(), "prompt", map[string]any{"message": "handled"})
+			_, err := client.commandWithPolicy(context.Background(), "prompt", map[string]any{"message": "handled"}, unboundedResponseWait)
 			result <- err
 		}()
 		require.Eventually(t, func() bool {
@@ -374,7 +398,7 @@ func TestRPCCommandFailuresAndTimeouts(t *testing.T) {
 		result := make(chan error, 1)
 
 		go func() {
-			_, err := client.command(ctx, "prompt", map[string]any{"message": "dialog"})
+			_, err := client.commandWithPolicy(ctx, "prompt", map[string]any{"message": "dialog"}, unboundedResponseWait)
 			result <- err
 		}()
 		require.Eventually(t, func() bool {
@@ -414,6 +438,40 @@ func TestRPCCommandFailuresAndTimeouts(t *testing.T) {
 	})
 }
 
+func TestRPCPromptWriteTimeoutIsFatal(t *testing.T) {
+	input, source := io.Pipe()
+	writer := newBlockingWriteCloser()
+	client := newRPCClient(input, writer, nil)
+	client.commandTimeout = 40 * time.Millisecond
+
+	promptResult := make(chan error, 1)
+	go func() {
+		_, err := client.commandWithPolicy(context.Background(), "prompt", map[string]any{"message": "blocked"}, unboundedResponseWait)
+		promptResult <- err
+	}()
+	waitFor(t, writer.entered, "blocked prompt write")
+
+	otherResult := make(chan error, 1)
+	go func() {
+		_, err := client.command(context.Background(), "get_state", nil)
+		otherResult <- err
+	}()
+
+	promptErr := <-promptResult
+	otherErr := <-otherResult
+	require.ErrorIs(t, promptErr, ErrCommandTimeout)
+	require.ErrorIs(t, otherErr, ErrCommandTimeout)
+	assert.Equal(t, promptErr.Error(), otherErr.Error())
+	waitFor(t, client.writerDone, "RPC writer")
+	select {
+	case <-client.closing:
+	default:
+		t.Fatal("write timeout did not close the transport")
+	}
+	require.NoError(t, source.Close())
+	waitFor(t, client.pumpDone, "RPC pump")
+}
+
 func TestRPCWriterCompletesShortWritesAndReportsFailures(t *testing.T) {
 	t.Run("short writes", func(t *testing.T) {
 		input, source := io.Pipe()
@@ -441,16 +499,18 @@ func TestRPCWriterCompletesShortWritesAndReportsFailures(t *testing.T) {
 	})
 
 	t.Run("write failure", func(t *testing.T) {
+		input, source := io.Pipe()
 		writeErr := errors.New("broken pipe")
-		client := newRPCClient(bytes.NewReader(nil), failingWriteCloser{err: writeErr}, nil)
+		client := newRPCClient(input, failingWriteCloser{err: writeErr}, nil)
 		client.commandTimeout = time.Second
 
 		_, err := client.command(context.Background(), "get_state", nil)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, writeErr)
 
-		waitFor(t, client.pumpDone, "RPC pump")
 		waitFor(t, client.writerDone, "RPC writer")
+		require.NoError(t, source.Close())
+		waitFor(t, client.pumpDone, "RPC pump")
 		client.close()
 	})
 }
@@ -562,6 +622,28 @@ func (b *shortWriteBuffer) Bytes() []byte {
 }
 
 func (b *shortWriteBuffer) Close() error {
+	return nil
+}
+
+type blockingWriteCloser struct {
+	entered   chan struct{}
+	closed    chan struct{}
+	enterOnce sync.Once
+	closeOnce sync.Once
+}
+
+func newBlockingWriteCloser() *blockingWriteCloser {
+	return &blockingWriteCloser{entered: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (w *blockingWriteCloser) Write([]byte) (int, error) {
+	w.enterOnce.Do(func() { close(w.entered) })
+	<-w.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (w *blockingWriteCloser) Close() error {
+	w.closeOnce.Do(func() { close(w.closed) })
 	return nil
 }
 
