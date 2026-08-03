@@ -85,6 +85,18 @@ If any assumption above diverges from the prior milestone's actual implementatio
 reconcile toward CONV §3–§7 — those are the binding seams; the notes here only locate
 where M6 picks up.
 
+Carried from M1 consolidation (resolve at this plan's gate):
+
+- **New registry mutations need a shared status applier first.** The startup orphan
+  sweep and resume paths add registry mutations beyond M1's four; before adding one,
+  extract a single `applyStatus` helper owning the live-PID and stopped/closed-PID-zero
+  rules plus transition validation, so a new mutation cannot silently miss a rule.
+- **fakepi cannot resume yet.** It opens its session file `O_TRUNC` and answers
+  `get_entries` from memory only, so a respawn with the same `--session-id` erases and
+  reports an empty session — M6's resume proof is unwritable until fakepi loads an
+  existing session file (header + entries, seeded leaf id, `O_APPEND`). Budget that
+  test-infra work in this plan.
+
 ## 3. Deliverables
 
 Go:

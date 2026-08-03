@@ -174,13 +174,19 @@ fallback. Every wire-status transition publishes a `status` event
 
 ### 4.4 Event classification (pi → StreamEvent)
 
-The pump maps each `pisession.Event` to exactly one `session.StreamEvent` (CONV §7) using
-the pinned taxonomy (CONV §4.2); payloads stay verbatim `json.RawMessage` (CONV §2,
+Durable `entry` StreamEvents are not mapped from any single pi event: pi emits no
+per-append event for ordinary entries, so the session process runs the pinned entry-feed
+sync (SPEC §6.3, CONV §4.2) — on each persistence-signal event (`message_end`,
+`entry_appended`, `session_info_changed`, `compaction_end`, `agent_end`/`agent_settled`)
+it calls `get_entries {since: syncCursor}`, broadcasts each newly returned entry as an
+`entry` StreamEvent (`EntryID` = entry id, `Data` = the entry verbatim, bumping
+`lastActivityAt`), and advances the cursor. The trigger events themselves still ride the
+`pi` lane verbatim. The pump maps every other `pisession.Event` to exactly one
+`session.StreamEvent` (CONV §7); payloads stay verbatim `json.RawMessage` (CONV §2,
 churn guard SPEC §10.5):
 
 | pi event | StreamEvent | notes |
 |---|---|---|
-| `entry_appended` | `entry`, `EntryID` = `entry.id`, `Data` = the entry verbatim | the only durable event; also bumps `lastActivityAt` |
 | `extension_ui_request` method `select\|confirm\|input\|editor` | `dialog` (request verbatim) | forwarded so the wire contract is stable from day one; the pending-dialog registry, resolution, and answer route are M5 |
 | `extension_ui_request` other methods | `ui` (request verbatim) | `notify`/`setStatus`/`setWidget`/`setTitle`/`set_editor_text` (rpc.md fire-and-forget) |
 | `session_info_changed` | `pi` | side effect first: mirror `name` into the registry (CONV §5) |
@@ -391,6 +397,41 @@ Open question for the conventions author (does not block M2): whether `GET /api/
 should mark handle-less `live` registry records as `stopped` *in the response* before
 M6's startup sweep exists. M2 passes them through the pinned derivation (→ `idle`) to
 avoid pre-deciding M6's cleanup semantics.
+
+### 4.11 Carried from M1 consolidation
+
+Dispositions from the M1 foundation-review triage; resolve at this plan's gate or in the
+noted chunk:
+
+- **Chunk 0 — foundation reshaping before new capability.** M2 opens with a chunk that
+  (a) extracts the one-shot run loop's abort → durable-settlement → close protocol from
+  `internal/app/run.go` into an explicit state machine both `run` and the Manager
+  consume; (b) adds a startup step-runner so pre-prompt interrupt checks are structural
+  rather than hand-placed; (c) teaches fakepi mid-stream sends (`steer`/`follow_up` via
+  `streamingBehavior`) and makes abort-response ordering a scenario knob
+  (respond-immediately default; respond-after-settle retained for the durable-abort
+  proof).
+- **`CommandError` export:** pi-declared command failures are an unexported transport
+  type; export an `errors.As`-able type when building the `pi_error` (502) envelope
+  mapping rather than classifying by elimination.
+- **Registry read surface:** `store.Get`/`List` currently serialize behind
+  `CreateSession`'s spawn-through-readiness window on the in-process checkout lock. Make
+  reads lock-free (atomic-snapshot semantics, as cross-process readers already have)
+  when M2 adopts the read surface, with concurrent-handler tests at this layer.
+- **Descendant-tracker cost model:** every session scans the whole process table each
+  50ms (hardcoded constant). Decide shared-machine-scanner vs on-demand capture before
+  the Manager holds many long-lived sessions; while reworking, close the narrow
+  frozen-orphan window (killTree SIGSTOPs pi's group and never SIGCONTs an unowned
+  stopped member).
+- **Prompt-response disposition, upstream:** pursue with pi an explicit prompt
+  acceptance/disposition signal that could replace unbounded response waits and
+  state inference (D-017 carry; conventions §6 pins the shipped shape).
+- **`GetEntries` empty-vs-missing:** a missing `entries` key and an empty list are
+  indistinguishable to callers; decide whether M2 replay semantics need the distinction.
+- **Wait-policy refactor precondition:** before altering transport wait policy or
+  acceptance semantics, extract `commandWithWritePolicy`'s write/await phases, give the
+  `StartPrompt` written-result handshake one owner, and convert the white-box transport
+  tests that pin those internals.
 
 ## 5. Implementation steps
 

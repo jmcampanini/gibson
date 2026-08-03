@@ -56,6 +56,11 @@ zeroed; CONV §5), history-from-JSONL for non-live sessions (CONV §3).
 If any precondition is missing or diverges from CONV, that is an M7 defect to fix during
 the triage loop (step 5.9), not a reason to redesign.
 
+Carried from M1 consolidation (resolve at this plan's gate): `internal/testws`
+hand-mirrors the config schema and its server encoder omits `bind`, so a scratch
+workspace with a non-localhost bind is inexpressible today. Add `WithBind` (or switch to
+encoding from `internal/config` types) before the multi-device proof.
+
 ---
 
 ## 3. Deliverables

@@ -266,8 +266,15 @@ field, so nothing goes stale on rename):
   never blocks on downstream consumers directly (Broker buffers apply backpressure
   per-client, §4.3).
 - **Command correlation:** gibson sets `id` = `c-<n>` (per-process atomic counter) on
-  every command; a map `id → chan response` resolves replies; 30s default timeout →
-  `pi_error`. Terminal output closure fails pending commands and closes input; a response
+  every command; a map `id → chan response` resolves replies. Every outbound write has a
+  30-second bound and a write timeout is fatal to the transport. Ordinary commands keep
+  one 30-second budget across enqueue, write, and response → `pi_error`. The `prompt`
+  command family (including steer and follow-up sends) keeps the write bound but waits
+  for its response with **no transport deadline** — until caller cancellation, process
+  exit, or transport closure — because pre-acceptance extension dialogs may legitimately
+  block acceptance indefinitely (SPEC §§6.4.3, 10.3). The typed session layer owns this
+  wait policy; the transport never branches on command names.
+  Terminal output closure fails pending commands and closes input; a response
   already demultiplexed for its command wins if closure races local write completion.
   `extension_ui_response` writes use pi's request uuid and expect no reply.
 - **Spawn/readiness sequence (create or resume):** spawn → `get_state` as readiness probe
@@ -302,6 +309,10 @@ needs it; do not add speculative implementations solely for a later plan.
   `GetState()`, `GetEntries(since)`, `GetSessionStats()`, `SetSessionName(name)`,
   `RespondUI(id, resolution)`, `Events() <-chan pisession.Event`, `Close(ctx)`.
   `pisession.Event` = `{Type string; Raw json.RawMessage}` (Type = pi's `type`).
+- `pisession.UIResolution` = `{Value *string; Confirmed *bool; Cancelled *bool}` (json
+  tags `value`/`confirmed`/`cancelled`, all `omitempty`) — the shared dialog-answer
+  shape for `RespondUI` and §3's dialog route body. All three fields are pointers so
+  validation can distinguish an absent field from an explicit `false`/empty value.
 - `session.Manager` — `Create(type, checkout, name, msg)`, `Get(id)`, `List()`,
   `Send(id, msg, behavior)`, `Abort(id)`, `AnswerDialog(id, dialogID, res)`,
   `CloseSession(id)`, `History(id, ...)`, `Subscribe(id) (*session.Subscription)`.
@@ -326,6 +337,13 @@ needs it; do not add speculative implementations solely for a later plan.
     provable. Deltas mutate an `inFlight` region keyed by `contentIndex`/`toolCallId`,
     always by replacement (cumulative partials); the finalized `entry` supersedes and
     clears it. React binding via `useReducer` + context; no Redux/Zustand.
+  - **Streaming state seam, pinned:** the reducer derives and owns a client-side
+    `isStreaming` boolean from `pi` events — set by `agent_start`, cleared by
+    `agent_settled` (`agent_end` as fallback). Streaming-dependent UI (the composer's
+    Steer/Queue affordances, dialog-adjacent behavior) keys off this flag, never off the
+    wire status enum: `blocked-on-dialog` masks `streaming`, and a session can be both
+    mid-stream and blocked at once. Wire status remains authoritative only for coarse
+    surfaces such as list badges.
 - Pinned libraries: `react-router-dom`, `react-markdown`. Nothing else without need.
 - Major surfaces (component names): `SessionListPage`, `LaunchFlow`, `SessionPage`;
   within chat: `MessageList`, `MessageCard`, `StreamingText`, `ThinkingBlock`,

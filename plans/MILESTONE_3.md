@@ -68,7 +68,7 @@ All frontend, under `web/` (paths repo-relative):
 | `web/src/components/MessageList.tsx`, `MessageCard.tsx`, `StreamingText.tsx` | Transcript rendering |
 | `web/src/components/ThinkingBlock.tsx`, `ToolCallCard.tsx` | **Placeholder** single-row components (M4 enriches in place, same filenames) |
 | `web/src/components/Composer.tsx` | Send when idle; disabled while streaming; inline error |
-| `web/package.json` | + `react-router-dom`, `react-markdown` (CONV §8 pinned libs); test runner per §7 open question |
+| `web/package.json` | + `react-router-dom`, `react-markdown` (CONV §8 pinned libs); Vitest test runner (CONV §9) |
 | `web/src/state/sessionStore.test.ts`, `web/src/api/stream.test.ts` | Unit tests (§7) |
 
 No new Go packages, routes, wire fields, event types, or statuses. Directory layout
@@ -213,7 +213,8 @@ sent in M3.
 ### 4.5 No optimistic echo
 
 The transcript renders **only** what arrives as entries. A sent message appears when its
-`entry_appended` flows back over SSE (locally: milliseconds). One source of truth means
+durable `entry` event (gibson's entry-feed sync, CONV §4.2) flows back over SSE
+(locally: milliseconds). One source of truth means
 two tabs can never disagree, and send-failure needs no rollback. The composer clears on
 2xx only.
 
@@ -262,7 +263,7 @@ Pinned here so the proof workflow (and M4–M7 proofs) can assert deterministica
 ## 5. Implementation steps
 
 1. **Deps** — `web/package.json`: add `react-router-dom`, `react-markdown`
-   (CONV §8 pinned; nothing else). Add the unit-test runner per the §7 open question.
+   (CONV §8 pinned; nothing else). Add Vitest, the pinned unit-test runner (CONV §9).
 2. **`web/src/api/types.ts`** — wire mirrors of CONV §3/§4: `SessionSummary`,
    `WireStatus`, `SessionType`, `Checkout`, `HistoryResponse`, `StreamEvent`,
    `ApiErrorBody`; structural-minimum pi types: `SessionEntry`
@@ -335,11 +336,9 @@ No new server surface. Frontend seams later milestones program against:
 
 ## 7. Testing
 
-**Open question (seam not pinned in CONV):** CONV §9 pins the Go test strategy but no
-frontend unit-test runner — a cross-milestone seam, since M4/M5 will also test reducers.
-This plan proceeds with **Vitest** (Vite-native, zero-config, `*.test.ts` beside
-sources, `npm test` script); flagging per CONV §10 so the conventions author can pin it.
-Only test scaffolding changes if decided otherwise.
+The frontend unit-test runner is pinned by CONV §9: **Vitest** (Vite-native,
+zero-config), with `*.test.ts` files beside the sources they cover under `web/src/`,
+run via `npm test`. M4/M5 reducer tests build on the same runner.
 
 **`web/src/state/sessionStore.test.ts`** (pure reducer — the high-value surface):
 - *Replay-equals-render*: build a canonical event sequence `S` (user entry →

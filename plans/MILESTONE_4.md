@@ -32,8 +32,9 @@ milestone contracts through the shared seams in CONV §3, §4, §7, and §8.
   `{"message","behavior"?:"steer"|"followUp"}`, `POST /api/sessions/{id}/abort`,
   `GET /api/sessions/{id}/events?since=` with the CONV §4 envelope
   (`entry` / `pi` / `status` / `reset` are the types M4 consumes), connect algorithm,
-  heartbeats, bounded buffers. All pi events other than `entry_appended` arrive as
-  `{"type":"pi","data":<pi event verbatim>}` — M4 depends on `message_start`,
+  heartbeats, bounded buffers. The durable `entry` lane is produced by gibson's
+  `get_entries` entry-feed sync (CONV §4.2), while pi events ride the `pi` lane verbatim
+  as `{"type":"pi","data":<pi event verbatim>}` — M4 depends on `message_start`,
   `message_update`, `message_end`, `tool_execution_start/update/end`, `agent_start`,
   `agent_end`, `agent_settled`, `queue_update` being forwarded verbatim (CONV §4.2 table).
   - **`GET /api/sessions/{id}/stats`** is in the CONV §3 route table and M2's scope is
@@ -138,7 +139,7 @@ interface ToolExecState {
 
 `isStreaming` is set by `pi` event `agent_start` and cleared by `agent_settled`
 (fallback: `agent_end`, if settled never arrives), seeded on hydrate as
-`status === "streaming"`. It exists separately from the wire `status` because M5's
+`status === "streaming"` — the client streaming-state seam pinned in CONV §8. It exists separately from the wire `status` because M5's
 `blocked-on-dialog` masks `streaming` on the wire while a run is still in flight —
 MILESTONE_5 preconditions on this flag and keys steer-vs-follow-up off it (§4.6, §6).
 
@@ -330,21 +331,28 @@ Extends M3 §4.8's append-only testid contract; the §8 proof asserts against th
    rule); pi failure → 502 `pi_error`. File: the httpapi handler file layout M2
    established, plus `_test.go` sibling.
 2. **fakepi scenarios** in `internal/fakepi/scenarios/` (mechanism from M1/M2; extend the
-   scenario scripting only as far as these need):
+   scenario scripting only as far as these need). Carry from M1 consolidation: before
+   authoring these scenarios, restructure fakepi's flat `Step` fields into typed
+   per-step payload structs — M4 needs overlapping tool calls with distinct
+   toolCallIds, thinking deltas, custom_message entries, and queue/compaction events
+   that the current six flat fields cannot express:
    - `tool_stream`: on `prompt` → `agent_start`, `message_start`, thinking deltas
      (`thinking_start/delta/end` with cumulative `message`), text deltas, a
-     `toolcall_start/delta/end` sequence, `message_end`, `entry_appended` (assistant
-     message with a `toolCall` block, id `e-a1`), then `tool_execution_start`
+     `toolcall_start/delta/end` sequence, `message_end` (appends the assistant message
+     with a `toolCall` block, id `e-a1`, to the JSONL — surfaced by gibson's entry
+     sync as an `entry` event), then `tool_execution_start`
      (toolCallId `tc-1`, toolName `bash`), **three `tool_execution_update` events whose
      `partialResult.content[0].text` values are strictly growing prefixes**
      (`"line1\n"`, `"line1\nline2\n"`, `"line1\nline2\nline3\n"`),
-     `tool_execution_end` (`isError:false`), `entry_appended` (toolResult entry),
-     a short final assistant text turn, `agent_end`, `agent_settled`. Writes all entries
-     to the real session JSONL (CONV §9).
+     `tool_execution_end` (`isError:false`, appending the toolResult entry to the
+     JSONL for the entry sync), a short final assistant text turn, `agent_end`,
+     `agent_settled`. Writes all entries to the real session JSONL (CONV §9).
    - `tool_error`: same shape, `tool_execution_end` with `isError:true` and a toolResult
      entry with `isError:true`.
    - `custom_message`: a normal text turn that also appends and emits an
-     `entry_appended` for `{"type":"custom_message","customType":"m4-note","content":
+     `entry_appended` (legitimate here — extension-appended custom entries are the one
+     case where pi emits it) for
+     `{"type":"custom_message","customType":"m4-note","content":
      "hello from fakepi","display":true}` (session-format.md shape) plus one with
      `display:false` (must not render).
    - `steer_redirect`: on `prompt` → begin a slow text stream (N deltas with sleeps);
@@ -459,8 +467,7 @@ Go (testify, `_test.go` next to code, fakepi only — CONV §9):
   driving a real tool call ("run `ls` via bash") asserting `tool_execution_*` events and
   a nonzero `contextUsage` from `/stats`.
 
-Frontend (pure-function tests; Vitest as the Vite-native runner — if M3's plan pinned a
-different runner, use that; these tests are runner-agnostic). Table tests over
+Frontend (pure-function tests; Vitest, the runner pinned by CONV §9). Table tests over
 handwritten event-sequence fixtures:
 
 - `message_update` folding: cumulative snapshots replace; state after events 1..n equals
