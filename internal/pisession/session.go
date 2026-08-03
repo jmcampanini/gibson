@@ -71,12 +71,20 @@ func Spawn(ctx context.Context, cfg Config) (*Session, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(cfg.StderrPath), 0o755); err != nil {
+	stderrDir := filepath.Dir(cfg.StderrPath)
+	if err := os.MkdirAll(stderrDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create pi stderr directory: %w", err)
+	}
+	if err := os.Chmod(stderrDir, 0o755); err != nil {
+		return nil, fmt.Errorf("set pi stderr directory permissions: %w", err)
 	}
 	stderr, err := os.OpenFile(cfg.StderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open pi stderr log: %w", err)
+	}
+	if err := stderr.Chmod(0o644); err != nil {
+		_ = stderr.Close()
+		return nil, fmt.Errorf("set pi stderr log permissions: %w", err)
 	}
 
 	argv := buildArgv(cfg.PiBin, cfg.SessionID, cfg.SessionDir, cfg.Model, cfg.Thinking, cfg.ExtraArgs)
@@ -206,12 +214,12 @@ func (s *Session) StartPrompt(ctx context.Context, message, behavior string) (<-
 }
 
 func (s *Session) Abort(ctx context.Context) error {
-	_, err := s.rpc.commandWithPolicy(ctx, "abort", nil, boundedResponseWait)
+	_, err := s.rpc.command(ctx, "abort", nil)
 	return err
 }
 
 func (s *Session) GetState(ctx context.Context) (json.RawMessage, error) {
-	return s.rpc.commandWithPolicy(ctx, "get_state", nil, boundedResponseWait)
+	return s.rpc.command(ctx, "get_state", nil)
 }
 
 func (s *Session) GetEntries(ctx context.Context, since string) ([]json.RawMessage, string, error) {
@@ -219,7 +227,7 @@ func (s *Session) GetEntries(ctx context.Context, since string) ([]json.RawMessa
 	if since != "" {
 		fields = map[string]any{"since": since}
 	}
-	data, err := s.rpc.commandWithPolicy(ctx, "get_entries", fields, boundedResponseWait)
+	data, err := s.rpc.command(ctx, "get_entries", fields)
 	if err != nil {
 		var commandErr *commandError
 		if since != "" && errors.As(err, &commandErr) {
@@ -243,11 +251,11 @@ func (s *Session) GetEntries(ctx context.Context, since string) ([]json.RawMessa
 }
 
 func (s *Session) GetSessionStats(ctx context.Context) (json.RawMessage, error) {
-	return s.rpc.commandWithPolicy(ctx, "get_session_stats", nil, boundedResponseWait)
+	return s.rpc.command(ctx, "get_session_stats", nil)
 }
 
 func (s *Session) SetSessionName(ctx context.Context, name string) error {
-	_, err := s.rpc.commandWithPolicy(ctx, "set_session_name", map[string]any{"name": name}, boundedResponseWait)
+	_, err := s.rpc.command(ctx, "set_session_name", map[string]any{"name": name})
 	return err
 }
 

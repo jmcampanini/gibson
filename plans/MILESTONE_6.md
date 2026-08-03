@@ -39,7 +39,8 @@ From **M1**:
   schema (`version:1`, per-session `{id,name,type,status,createdAt,lastActivityAt,pid}`,
   status `live|stopped|closed`), process-local serialization plus per-checkout
   cross-process locking with reload-under-lock and atomic write-temp-then-rename
-  replacement, session id generation `s-<YYYYMMDD>-<6 [a-z0-9]>` with collision
+  replacement, allocation-locked `CreateSession`, lifecycle-enforcing `SetLive` /
+  `SetStatus`, session id generation `s-<YYYYMMDD>-<6 [a-z0-9]>` with collision
   regeneration, and `FindSessionFile(id)` locating a session's JSONL by its **header** id,
   never by filename.
 - `internal/fakepi` + `internal/pitest` (`BuildFakePi(t)`) + `internal/testws`
@@ -268,6 +269,13 @@ Two layers enforce it:
 Corrupt `state.json` (unparsable JSON): rename to `state.json.corrupt-<unix-ts>`,
 rebuild per §4.1.2, log prominently. Registry lifecycle is M6's remit (MS coverage
 map §4) and silent data loss is worse than a quarantined file.
+
+M1 deliberately fails closed when a session JSONL has an empty, malformed, unreadable,
+or duplicate header, so the offending checkout requires manual repair before another
+session can be allocated. M6 owns a recovery policy as part of rebuild: preserve the
+original bytes, identify every affected path in a prominent diagnostic, and either
+quarantine or skip invalid files only under an explicit rebuild operation. Normal M1
+allocation remains strict; recovery must never discard a file silently.
 
 ### 4.5 History for non-live sessions: parse the JSONL (decided, justified)
 

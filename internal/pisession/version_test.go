@@ -39,6 +39,23 @@ func TestResolvePiBin(t *testing.T) {
 		}
 	})
 
+	t.Run("configured relative path becomes absolute", func(t *testing.T) {
+		dir := t.TempDir()
+		pi := writeExecutable(t, dir, "project-pi", "echo 0.82.0")
+		t.Chdir(dir)
+
+		found, err := ResolvePiBin("./project-pi")
+		if err != nil {
+			t.Fatalf("ResolvePiBin() error = %v", err)
+		}
+		if !filepath.IsAbs(found) {
+			t.Fatalf("ResolvePiBin() = %q, want an absolute path", found)
+		}
+		if found != pi {
+			t.Fatalf("ResolvePiBin() = %q, want %q", found, pi)
+		}
+	})
+
 	t.Run("empty PATH", func(t *testing.T) {
 		t.Setenv("PATH", "")
 

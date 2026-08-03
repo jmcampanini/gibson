@@ -1,28 +1,29 @@
 package store
 
-import (
-	"path/filepath"
-	"sync"
-)
+import "path/filepath"
 
 const gibsonDirName = ".gibson"
 
 type Store struct {
 	checkout string
-	state    registry
-	loaded   bool
-	mu       sync.Mutex
+	write    func(string, registry) error
 }
 
 func Open(checkoutPath string) *Store {
-	return &Store{checkout: filepath.Clean(checkoutPath)}
+	checkout := filepath.Clean(checkoutPath)
+	if absolute, err := filepath.Abs(checkout); err == nil {
+		checkout = absolute
+	}
+	return &Store{checkout: checkout, write: writeRegistry}
 }
 
 func (s *Store) EnsureLayout() error {
-	if err := makeDir(s.SessionsDir()); err != nil {
-		return err
+	for _, path := range []string{s.gibsonDir(), s.SessionsDir(), s.logsDir()} {
+		if err := makeDir(path); err != nil {
+			return err
+		}
 	}
-	return makeDir(s.logsDir())
+	return nil
 }
 
 func (s *Store) SessionsDir() string {
@@ -37,6 +38,10 @@ func (s *Store) StderrLogPath(id string) string {
 	return filepath.Join(s.logsDir(), id+".stderr.log")
 }
 
+func (s *Store) gibsonDir() string {
+	return filepath.Join(s.checkout, gibsonDirName)
+}
+
 func (s *Store) logsDir() string {
-	return filepath.Join(s.checkout, gibsonDirName, "logs")
+	return filepath.Join(s.gibsonDir(), "logs")
 }

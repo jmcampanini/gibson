@@ -116,7 +116,9 @@ JSON object + `\n`.
   dropped. Prompt submission keeps the write bound but its response remains pending until
   caller cancellation, process exit, transport closure, or acceptance so pre-acceptance
   extension dialogs can wait. A write timeout or terminal output read is fatal to the
-  transport, closes stdin, and fails every pending command. The session method selects
+  transport, closes stdin, and fails every pending command; a response already demultiplexed
+  for its command wins if terminal closure races the writer's local completion signal. The
+  session method selects
   this policy; D-017 owns its conventions,
   upstream-disposition, and M2 plan-gate reconciliation.
 - `success:false` responses resolve the waiter with an error wrapping pi's `error` string.
@@ -193,7 +195,8 @@ the agent is already streaming, otherwise the command errors. `Prompt(ctx, msg, 
 sets the field only when `behavior != ""`; `run` always sends `""` (fresh session, never
 streaming).
 
-Session identity: gibson generates the id (`store.NewSessionID`, conventions §5 format
+Session identity: gibson generates the id (the run path uses `store.CreateSession`;
+`store.NewSessionID` exposes the same collision-aware generator, conventions §5 format
 `s-<YYYYMMDD>-<6 of [a-z0-9] via crypto/rand>`, matching pi's id regex SPEC §5.1.2,
 regenerated on collision against registry + `sessions/` headers) and passes it via
 `--session-id`; gibson session id **is** the pi session id. The session **file name**
@@ -277,9 +280,25 @@ lock and completes its write-temp-then-`os.Rename` replacement before unlocking.
 prevents concurrent one-shot commands, or a command overlapping the later server, from
 losing records while preserving atomic snapshots for readers. Chunk 4 establishes the
 process-local and atomic-replacement shape; Chunk 6 completes the cross-process protocol.
+Fresh-session creation holds that same per-checkout lock while it reloads the registry,
+scans session-file headers for collisions, allocates an ID, starts pi through readiness,
+and writes the first live record. Startup is therefore serialized per checkout without a
+reservation file, and no second Gibson process can spawn the same ID between checking and
+recording it. `SessionCreation.Rollback` stops the spawned process under that lock if the
+live replacement fails; the store then writes the record as stopped when possible. Any
+later ambiguous cleanup uses `StopIfLivePID`, which changes only the matching live owner.
+
+Registry lifecycle mutations allow idempotent same-state writes plus `live→stopped|closed`,
+`stopped→live|closed`, and `closed→live`; `closed→stopped` is rejected so late cleanup
+cannot erase an explicit close. A live record requires a positive diagnostic PID, and a
+same-state live write cannot replace a different live PID; stopped and closed records
+always persist PID zero. Status mutations preserve every other record
+field.
+
 What `run` writes, when:
 
-1. at spawn: `Put(Record{status: live, pid, createdAt=lastActivityAt=now})`;
+1. after spawn readiness, while the allocation lock is still held:
+   `Record{status: live, pid, createdAt=lastActivityAt=now}`;
 2. on accepted prompt and on each `message_end`: `Touch(id, now)` — `message_end` is
    the moment pi persists the finalized message to the session JSONL; pi emits no
    per-entry append event for normal conversation (§4.4, §4.11). (Atomic rename is
@@ -300,8 +319,8 @@ locate workspace → `config.Load` (already validated) → resolve session type 
 → error listing configured types) → resolve target checkout (§4.10) →
 `pisession.ResolvePiBin` + `pisession.CheckPiVersion` (every invocation that spawns pi
 checks first; versions newer than the verified 0.82.x line log a Charm warning) →
-`EnsureLayout` → `NewSessionID` → spawn → registry `live` → `Prompt` → stream loop →
-shutdown (`Close`, registry `stopped`).
+`EnsureLayout` → allocation-locked `CreateSession` (ID → spawn/readiness → registry
+`live`) → `Prompt` → stream loop → shutdown (`Close`, registry `stopped`).
 
 Output contract (pipeable stdout, human stderr):
 
@@ -495,9 +514,15 @@ here so later plans may rely on them):
   `pisession.CheckPiVersion(ctx, bin) (VersionResult, error)` reused by `run`, with
   minimum/verified/newer behavior from §2.
 - `store.Store` (`store.Open(checkoutPath)`): `EnsureLayout()`, `SessionsDir()`,
-  `StderrLogPath(id)`, `NewSessionID() (string, error)`, `Put(Record)`,
+  `StderrLogPath(id)`, `NewSessionID() (string, error)`,
+  `CreateSession(func(id string) (SessionCreation, error)) (string, error)` (holds
+  allocation through callback + live write and invokes `SessionCreation.Rollback` under
+  lock on post-spawn failure), `Put(Record)` (create only),
+  `SetLive(id string, pid int)`, `StopIfLivePID(id string, pid int) (bool, error)`,
   `SetStatus(id string, s Status)`, `Touch(id string, t time.Time)`,
-  `Get(id) (Record, bool)`, `List() []Record`, `FindSessionFile(id) (string, error)`;
+  `Get(id) (Record, bool)`, `List() []Record`,
+  `FindSessionFile(id) (string, error)`;
+  `store.SessionCreation` = `{Record store.Record; Rollback func() error}`;
   `store.Record`, `store.Status` (`StatusLive/StatusStopped/StatusClosed`, persisted as
   conventions §5's `live|stopped|closed`).
 - `workspace.ResolveCheckout(workspaceRoot, name string) (string, error)`.
@@ -522,9 +547,11 @@ Unit (no subprocess):
 - Correlation: timeout → `ErrCommandTimeout`; late reply dropped; `success:false` error
   text propagation; concurrent senders serialized (race detector on: `go test -race`).
 - Argv: exact order and verbatim `extra_args` (SPEC §3.2.4, conventions §6).
-- Store: id format `^s-\d{8}-[a-z0-9]{6}$` + pi regex conformance; collision regen;
-  atomic registry writes (interrupted-write simulation: temp file left behind is
-  ignored); status transitions.
+- Store: id format `^s-\d{8}-[a-z0-9]{6}$` + pi regex conformance; collision regeneration;
+  strict allocation through spawn and live write; same-process and cross-process registry
+  serialization with reload-under-lock; atomic registry writes (interrupted-write
+  simulation: temp file left behind is ignored); the exhaustive status-transition and PID
+  matrix; exact permissions; malformed and duplicate session-header rejection.
 
 fakepi integration (default run):
 - Full spawn→probe→prompt→settled flow; deltas concatenate to scenario text; session

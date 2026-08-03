@@ -185,6 +185,11 @@ Allowed exceptions, by construction: `gibson.toml` and the `.gitignore` line are
 committed repo citizens created at workspace setup, not by Gibson (SPEC §3.1.1,
 §4.2.1).
 
+As part of this audit, re-evaluate whether log creation should use `O_NOFOLLOW` and
+whether directory setup needs stronger protection than the M1 `Lstat`-then-`Chmod`
+checks. M1's run path validates the layout before spawn, so this is defense in depth
+against same-user filesystem races rather than a prerequisite for the one-shot path.
+
 ### 4.6 Single-writer guard (SPEC §5.1.3, §10.1)
 
 Gibson must never have two processes on one session id. The Manager's live-process map

@@ -33,10 +33,11 @@ const (
 )
 
 type RunOptions struct {
-	Type    string
-	Message string
-	Stdout  io.Writer
-	Stderr  io.Writer
+	Type     string
+	Message  string
+	Checkout string
+	Stdout   io.Writer
+	Stderr   io.Writer
 }
 
 type runSession interface {
@@ -103,6 +104,13 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 	if !ok {
 		return RunCompleted, unknownSessionTypeError(options.Type, cfg.Sessions)
 	}
+	checkout := ws.LaunchCheckout
+	if options.Checkout != "" {
+		checkout, err = workspace.ResolveCheckout(ws.Root, options.Checkout)
+		if err != nil {
+			return classifyRunError(ctx, err)
+		}
+	}
 
 	piBin, err := dependencies.resolvePiBin(cfg.Server.PiBin)
 	if err != nil {
@@ -121,41 +129,56 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		)
 	}
 
-	storage := store.Open(ws.LaunchCheckout)
+	storage := store.Open(checkout)
 	if err := storage.EnsureLayout(); err != nil {
 		return RunCompleted, err
 	}
-	sessionID, err := storage.NewSessionID()
-	if err != nil {
-		return RunCompleted, fmt.Errorf("generate session id: %w", err)
-	}
-	logPath := storage.StderrLogPath(sessionID)
-	session, err := dependencies.spawn(ctx, pisession.Config{
-		PiBin:      piBin,
-		SessionID:  sessionID,
-		SessionDir: storage.SessionsDir(),
-		Cwd:        ws.LaunchCheckout,
-		Model:      sessionType.Model,
-		Thinking:   sessionType.Thinking,
-		ExtraArgs:  sessionType.ExtraArgs,
-		StderrPath: logPath,
-		Logger:     logger,
+	var session runSession
+	var logPath string
+	sessionID, err := storage.CreateSession(func(id string) (store.SessionCreation, error) {
+		logPath = storage.StderrLogPath(id)
+		spawned, spawnErr := dependencies.spawn(ctx, pisession.Config{
+			PiBin:      piBin,
+			SessionID:  id,
+			SessionDir: storage.SessionsDir(),
+			Cwd:        checkout,
+			Model:      sessionType.Model,
+			Thinking:   sessionType.Thinking,
+			ExtraArgs:  sessionType.ExtraArgs,
+			StderrPath: logPath,
+			Logger:     logger,
+		})
+		if spawnErr != nil {
+			return store.SessionCreation{}, spawnErr
+		}
+		session = spawned
+		startedAt := dependencies.now().UTC().Format(time.RFC3339)
+		return store.SessionCreation{
+			Record: store.Record{
+				ID:             id,
+				Type:           options.Type,
+				Status:         store.StatusLive,
+				CreatedAt:      startedAt,
+				LastActivityAt: startedAt,
+				PID:            session.PID(),
+			},
+			Rollback: func() error {
+				rollbackErr := closeRunSession(spawned, false, nil)
+				session = nil
+				return rollbackErr
+			},
+		}, nil
 	})
 	if err != nil {
-		return classifyRunError(ctx, err)
-	}
-
-	startedAt := dependencies.now().UTC()
-	if err := storage.Put(store.Record{
-		ID:             sessionID,
-		Type:           options.Type,
-		Status:         store.StatusLive,
-		CreatedAt:      startedAt.Format(time.RFC3339),
-		LastActivityAt: startedAt.Format(time.RFC3339),
-		PID:            session.PID(),
-	}); err != nil {
-		closeErr := closeRunSession(session, false, nil)
-		return RunCompleted, errors.Join(fmt.Errorf("record live session: %w", err), closeErr)
+		var closeErr error
+		var registryErr error
+		if session != nil {
+			closeErr = closeRunSession(session, false, nil)
+			if _, stopErr := storage.StopIfLivePID(sessionID, session.PID()); stopErr != nil {
+				registryErr = fmt.Errorf("record stopped session after creation failure: %w", stopErr)
+			}
+		}
+		return classifyRunError(ctx, errors.Join(fmt.Errorf("create live session: %w", err), closeErr, registryErr))
 	}
 	finisher := runFinisher{
 		session:   session,
@@ -415,27 +438,11 @@ promptWait:
 				}
 				settled, eventErr := handleEvent(event)
 				if eventErr != nil {
-					runErr := errors.Join(eventErr, presenter.finishText())
-					if interrupt.started {
-						return finishInterrupted(false, runErr)
-					}
-					return finisher.finish(RunCompleted, runErr)
+					return finishEventError(eventErr)
 				}
 				if settled {
-					if interrupt.started {
-						if interrupt.complete {
-							return finishInterrupted(false, nil)
-						}
-						continue
-					}
-					select {
-					case <-interrupts:
-						if done, outcome, interruptErr := handleInterrupt(); done {
-							return outcome, interruptErr
-						}
-						continue
-					default:
-						return finisher.finish(RunCompleted, errors.Join(presenter.finalAssistantErr, presenter.finishText()))
+					if done, outcome, finishErr := finishSettled(); done {
+						return outcome, finishErr
 					}
 				}
 				continue
@@ -492,27 +499,11 @@ promptWait:
 			}
 			settled, eventErr := handleEvent(event)
 			if eventErr != nil {
-				runErr := errors.Join(eventErr, presenter.finishText())
-				if interrupt.started {
-					return finishInterrupted(false, runErr)
-				}
-				return finisher.finish(RunCompleted, runErr)
+				return finishEventError(eventErr)
 			}
 			if settled {
-				if interrupt.started {
-					if interrupt.complete {
-						return finishInterrupted(false, nil)
-					}
-					continue
-				}
-				select {
-				case <-interrupts:
-					if done, outcome, interruptErr := handleInterrupt(); done {
-						return outcome, interruptErr
-					}
-					continue
-				default:
-					return finisher.finish(RunCompleted, errors.Join(presenter.finalAssistantErr, presenter.finishText()))
+				if done, outcome, finishErr := finishSettled(); done {
+					return outcome, finishErr
 				}
 			}
 		case result := <-stateResults:

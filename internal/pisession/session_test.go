@@ -31,6 +31,9 @@ func TestUIResolutionMarshal(t *testing.T) {
 
 func TestSessionBasicLifecycle(t *testing.T) {
 	cfg := newSessionTestConfig(t, "s-20260728-basic1")
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfg.StderrPath), 0o700))
+	require.NoError(t, os.Chmod(filepath.Dir(cfg.StderrPath), 0o700))
+	require.NoError(t, os.WriteFile(cfg.StderrPath, nil, 0o600))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -38,6 +41,12 @@ func TestSessionBasicLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	cleanupSession(t, session)
 
+	stderrDirInfo, err := os.Stat(filepath.Dir(cfg.StderrPath))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), stderrDirInfo.Mode().Perm())
+	stderrInfo, err := os.Stat(cfg.StderrPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), stderrInfo.Mode().Perm())
 	assert.Equal(t, cfg.SessionID, session.ID())
 	assert.Positive(t, session.PID())
 	processGroup, err := syscall.Getpgid(session.PID())

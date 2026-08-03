@@ -41,7 +41,7 @@ plan. Known planning inconsistencies are recorded in
 - [x] Chunk 3 — Basic live pi session
 - [x] Chunk 4 — First human-drivable run
 - [x] Chunk 5 — Interruptible and crash-safe runs
-- [ ] Chunk 6 — Named-checkout runs and storage hardening
+- [x] Chunk 6 — Named-checkout runs and storage hardening
 - [ ] Chunk 7 — Hostile records and extension boundaries
 - [ ] Chunk 8 — Complete M1 acceptance
 
@@ -285,7 +285,7 @@ Chunks 1–4, including the complete one-shot application workflow and storage l
 
 ### Mandatory approval gate
 
-- [ ] Present interrupt and crash behavior with process, session, registry, and log
+- [x] Present interrupt and crash behavior with process, session, registry, and log
   evidence, then receive explicit approval before beginning Chunk 6.
 
 ## Chunk 6 — Named-checkout runs and storage hardening
@@ -295,21 +295,32 @@ Chunks 1–4, including the complete one-shot application workflow and storage l
 Extend the same one-shot command to a named sibling checkout and finish the adversarial
 storage guarantees deferred from the first human-drivable slice.
 
-- [ ] Add the final `--checkout <name>` flag, defaulting to the checkout from which Gibson
+- [x] Add the final `--checkout <name>` flag, defaulting to the checkout from which Gibson
   was launched.
-- [ ] Resolve a name as a sibling beneath the workspace root, reject traversal, and accept
+- [x] Resolve a name as a sibling beneath the workspace root, reject traversal, and accept
   either an ordinary Git directory or a linked-worktree `.git` marker without enumerating
   all worktrees.
-- [ ] Keep the selected checkout self-contained: pi runs there and its session JSONL,
+- [x] Keep the selected checkout self-contained: pi runs there and its session JSONL,
   registry, and stderr log all live only under that checkout's `.gibson/` directory.
-- [ ] Detect session-ID collisions against both registry records and existing session-file
+- [x] Detect session-ID collisions against both registry records and existing session-file
   headers, regenerating after every collision.
-- [ ] Harden registry metadata preservation, exhaustive status transitions, file and
+- [x] Harden registry metadata preservation, exhaustive status transitions, file and
   directory permissions, and interrupted or leftover temporary-file behavior.
-- [ ] Serialize registry read-modify-write operations across Gibson processes, reload the
+- [x] Serialize registry read-modify-write operations across Gibson processes, reload the
   latest state while holding the lock, and atomically replace the file before unlocking.
-- [ ] Find pi session files by reading their header IDs rather than trusting filenames.
-- [ ] Reject unknown, missing, traversing, and non-Git targets before spawning pi.
+- [x] Find pi session files by reading their header IDs rather than trusting filenames.
+- [x] Reject unknown, missing, traversing, and non-Git targets before spawning pi.
+
+Session allocation uses the same per-checkout lock as registry mutation and holds it from
+collision scanning through pi readiness and the first live-record replacement. This
+serializes only startup in one checkout and prevents two Gibson processes from ever
+spawning the same ID without adding reservation files to `.gibson/`. If the first live
+write fails, the creation callback stops pi before the lock is released and reconciles any
+possibly committed record to stopped; later cleanup only updates a live record whose PID
+still matches that process. Registry mutations enforce idempotent same-state writes plus
+`live→stopped|closed`, `stopped→live|closed`, and `closed→live`; `closed→stopped` is rejected. Live records
+require a positive PID, and a same-state live write cannot replace a different live PID;
+stopped and closed records always persist PID zero.
 
 ### Dependencies
 
@@ -317,19 +328,27 @@ Chunks 1–5.
 
 ### Verification criteria
 
-- [ ] `gibson run <type> <message> --checkout wt-x` runs in `wt-x` and places every
+- [x] `gibson run <type> <message> --checkout wt-x` runs in `wt-x` and places every
   artifact only under `wt-x/.gibson/`.
-- [ ] Omitting `--checkout` preserves launch-checkout behavior.
-- [ ] Ordinary repositories and linked worktrees resolve correctly; invalid targets fail
+- [x] Omitting `--checkout` preserves launch-checkout behavior.
+- [x] Ordinary repositories and linked worktrees resolve correctly; invalid targets fail
   clearly before pi starts.
-- [ ] Storage paths, formats, and permissions match the M1 contract.
-- [ ] IDs match the required format and regenerate for every collision source.
-- [ ] Leftover temporary files cannot replace or corrupt a readable registry.
-- [ ] Registry updates preserve metadata and enforce every intended status transition;
+- [x] Storage paths, formats, and permissions match the M1 contract.
+- [x] IDs match the required format and regenerate for every collision source.
+- [x] Leftover temporary files cannot replace or corrupt a readable registry.
+- [x] Registry updates preserve metadata and enforce every intended status transition;
   concurrent one-shot processes retain both records without lost updates.
-- [ ] Session files are found by header identity even when filenames are opaque.
-- [ ] Generated state produces no Git status noise in either checkout.
-- [ ] `make check` passes.
+- [x] Session files are found by header identity even when filenames are opaque.
+- [x] Generated state produces no Git status noise in either checkout.
+- [x] `make check` passes.
+
+### Human proof
+
+- [x] Run `make cli-proof` from `~/Code/github.com/jmcampanini/gibson/main`; require its
+  compiled-binary named-checkout, invalid-target, concurrent-registry, artifact-isolation,
+  permissions, and Git-cleanliness evidence to end in `GIBSON_CLI_PROOF=PASS`.
+- [x] Capture that command and its verbatim output in
+  `.sandbox/demos/m1-chunk-6.html`.
 
 ### Mandatory approval gate
 
@@ -354,6 +373,9 @@ likely to corrupt a subprocess integration, while keeping full dialog UX outside
   blocking requests and let Ctrl+C follow Chunk 5's durable abort path.
 - [ ] Exercise tool activity, notifications, agent-reported errors, backpressure, and close
   ordering through the composed application boundary.
+- [ ] Add a deterministic transport test proving that a response already demultiplexed for
+  its command wins when terminal closure races local write completion, while a fatal write
+  failure still resolves pending commands consistently.
 - [ ] Preserve raw pi-owned JSON and valid session files throughout every hostile scenario.
 
 ### Dependencies
@@ -371,6 +393,8 @@ Chunks 1–6.
 - [ ] Tool, notification, and error diagnostics stay on stderr while stdout remains only
   assistant text.
 - [ ] Full event-channel backpressure and shutdown ordering remain race-clean.
+- [ ] The response-versus-closure transport contract is owned by a deterministic test
+  before D-017 changes command wait policy.
 - [ ] `make check` passes.
 
 ### Mandatory approval gate
@@ -406,8 +430,9 @@ workflow. Fix it at its faithful owner or record an explicit later-milestone dis
 do not silently drop it and do not pull unrelated HTTP or browser scope forward.
 
 - [ ] Make pre-prompt startup interruption coherent: no prompt or tool work begins after a
-  buffered SIGINT, startup cancellation maps to exit 130, and a second interrupt can force
-  a stalled readiness/version path.
+  buffered SIGINT, startup cancellation maps to exit 130, the checkout allocation-lock
+  wait is interruptible, and a second interrupt can force a stalled readiness/version
+  path.
 - [ ] Harden Linux process-disappearance handling: treat `ESRCH` as not-exists, prevent
   unrelated per-PID churn from aborting the whole cleanup scan, and do not permanently
   latch root disappearance from a transient identity-read error.
@@ -418,6 +443,10 @@ do not silently drop it and do not pull unrelated HTTP or browser scope forward.
   becomes `ErrInvalidCursor`; preserve unrelated command failures for future consumers.
 - [ ] Preserve useful diagnostics when cancellation races another failure while retaining
   exit 130, and avoid presenting an empty session-file field before pi reports the path.
+- [ ] Remove the unused `NewSessionID` export or document that it does not reserve the
+  returned ID; keep `CreateSession` as the only safe allocation-and-creation path.
+- [ ] Make registry reads return strict load and validation errors instead of presenting a
+  corrupt registry as empty or not found; complete this before M2 adopts the read surface.
 
 ### Dependencies
 

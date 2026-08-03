@@ -49,7 +49,8 @@ Manager boundary):
   generation
   (`s-<YYYYMMDD>-<6 [a-z0-9]>` with collision regeneration), registry record shape per
   CONV §5. Assumed surface: `store.Open(checkoutPath)` returning a handle with
-  `List() / Get(id) / Put(record)` and layout/log-path helpers.
+  `List() / Get(id) / Put(record)`, allocation-locked `CreateSession`, `SetLive`, and
+  layout/log-path helpers.
 - `internal/fakepi` + `internal/pitest`: fakepi binary honoring `--session-id` /
   `--session-dir`, writing a real v3 session JSONL, answering `get_state`, `get_entries`
   (including `since` and `success:false` on unknown cursor), `get_session_stats`,
@@ -102,14 +103,14 @@ so late SSE subscribers and `/history` still work; the handle map is the guard t
 enforces one-process-per-id (SPEC §5.1.3 — `Create` ids are fresh, and M2 has no respawn
 path at all).
 
-**Create flow** (CONV §6 sequence, exact): generate id via store → spawn pi with the
-pinned argv in the target checkout → write registry record `{status:"live", pid}` with
-the spawned pid (spawn-then-record, matching M1 §4.9) → `get_state` readiness probe
-(also caches `sessionFile` from its response for §4.6) → `set_session_name` if a name
-was given → `prompt` with the first message → return 201 only after the prompt is
-accepted (rpc.md: the `prompt` response means accepted/queued, not completed). On any
-failure before prompt acceptance: best-effort kill, remove the registry record if it was
-written, return `pi_error` (local decision, §4.10).
+**Create flow** (CONV §6 sequence, exact): enter M1's allocation-locked `CreateSession`
+callback → generate the id → spawn pi with the pinned argv in the target checkout →
+`get_state` readiness probe (also caches `sessionFile` from its response for §4.6) →
+atomically write `{status:"live", pid}` and release the allocation lock →
+`set_session_name` if a name was given → `prompt` with the first message → return 201 only
+after the prompt is accepted (rpc.md: the `prompt` response means accepted/queued, not
+completed). On any failure before prompt acceptance: best-effort kill, remove or stop the
+registry record if it was written, return `pi_error` (local decision, §4.10).
 
 **Pump goroutine** (one per live handle): `for ev := range sess.Events()` — classify
 (§4.4), update status state, apply registry side effects, publish to the Broker. The pump

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -39,7 +40,11 @@ func ResolvePiBin(configured string) (string, error) {
 
 	path, err := exec.LookPath(name)
 	if err == nil {
-		return path, nil
+		absolutePath, absErr := filepath.Abs(path)
+		if absErr != nil {
+			return "", fmt.Errorf("resolve pi executable %q: %w", path, absErr)
+		}
+		return absolutePath, nil
 	}
 	if configured == "" {
 		return "", fmt.Errorf("%w: %q is not on PATH; install pi %s or newer, or configure pi_bin: %v", ErrPiNotFound, name, MinimumPiVersion, err)

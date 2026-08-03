@@ -35,79 +35,105 @@ type registry struct {
 }
 
 func (s *Store) Put(record Record) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if record.ID == "" {
-		return errors.New("put session: id is required")
-	}
-	if !record.Status.valid() {
-		return fmt.Errorf("put session %q: invalid status %q", record.ID, record.Status)
-	}
-	createdAt, err := normalizeTimestamp(record.CreatedAt)
+	record, err := normalizeRecord(record)
 	if err != nil {
-		return fmt.Errorf("put session %q: createdAt: %w", record.ID, err)
+		return fmt.Errorf("put session: %w", err)
 	}
-	lastActivityAt, err := normalizeTimestamp(record.LastActivityAt)
-	if err != nil {
-		return fmt.Errorf("put session %q: lastActivityAt: %w", record.ID, err)
-	}
-	record.CreatedAt = createdAt
-	record.LastActivityAt = lastActivityAt
-
-	state, err := s.currentState()
-	if err != nil {
-		return err
-	}
-	state.Sessions[record.ID] = record
-	return s.replaceState(state)
+	return s.withLockedState(func(state *registry) error {
+		if _, exists := state.Sessions[record.ID]; exists {
+			return fmt.Errorf("put session %q: already exists", record.ID)
+		}
+		state.Sessions[record.ID] = record
+		return s.write(s.RegistryPath(), *state)
+	})
 }
 
 func (s *Store) Touch(id string, at time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.withLockedState(func(state *registry) error {
+		record, ok := state.Sessions[id]
+		if !ok {
+			return fmt.Errorf("touch session %q: not found", id)
+		}
+		record.LastActivityAt = at.UTC().Format(time.RFC3339)
+		state.Sessions[id] = record
+		return s.write(s.RegistryPath(), *state)
+	})
+}
 
-	state, err := s.currentState()
-	if err != nil {
-		return err
+func (s *Store) SetLive(id string, pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("set session %q live: pid must be positive", id)
 	}
-	record, ok := state.Sessions[id]
-	if !ok {
-		return fmt.Errorf("touch session %q: not found", id)
+	return s.withLockedState(func(state *registry) error {
+		record, ok := state.Sessions[id]
+		if !ok {
+			return fmt.Errorf("set session %q live: not found", id)
+		}
+		if err := validateTransition(record.Status, StatusLive); err != nil {
+			return fmt.Errorf("set session %q live: %w", id, err)
+		}
+		if record.Status == StatusLive && record.PID != pid {
+			return fmt.Errorf("set session %q live: already owned by pid %d", id, record.PID)
+		}
+		record.Status = StatusLive
+		record.PID = pid
+		state.Sessions[id] = record
+		return s.write(s.RegistryPath(), *state)
+	})
+}
+
+func (s *Store) StopIfLivePID(id string, pid int) (bool, error) {
+	if pid <= 0 {
+		return false, fmt.Errorf("stop session %q by pid: pid must be positive", id)
 	}
-	record.LastActivityAt = at.UTC().Format(time.RFC3339)
-	state.Sessions[id] = record
-	return s.replaceState(state)
+	stopped := false
+	err := s.withLockedState(func(state *registry) error {
+		record, ok := state.Sessions[id]
+		if !ok || record.Status != StatusLive || record.PID != pid {
+			return nil
+		}
+		record.Status = StatusStopped
+		record.PID = 0
+		state.Sessions[id] = record
+		if err := s.write(s.RegistryPath(), *state); err != nil {
+			return err
+		}
+		stopped = true
+		return nil
+	})
+	return stopped, err
 }
 
 func (s *Store) SetStatus(id string, status Status) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if !status.valid() {
 		return fmt.Errorf("set session %q status: invalid status %q", id, status)
 	}
-	state, err := s.currentState()
-	if err != nil {
-		return err
-	}
-	record, ok := state.Sessions[id]
-	if !ok {
-		return fmt.Errorf("set session %q status: not found", id)
-	}
-	record.Status = status
-	if status == StatusStopped || status == StatusClosed {
-		record.PID = 0
-	}
-	state.Sessions[id] = record
-	return s.replaceState(state)
+	return s.withLockedState(func(state *registry) error {
+		record, ok := state.Sessions[id]
+		if !ok {
+			return fmt.Errorf("set session %q status: not found", id)
+		}
+		if err := validateTransition(record.Status, status); err != nil {
+			return fmt.Errorf("set session %q status: %w", id, err)
+		}
+		if status == StatusLive && record.PID <= 0 {
+			return fmt.Errorf("set session %q status: live status requires a positive pid", id)
+		}
+		record.Status = status
+		if status == StatusStopped || status == StatusClosed {
+			record.PID = 0
+		}
+		state.Sessions[id] = record
+		return s.write(s.RegistryPath(), *state)
+	})
 }
 
 func (s *Store) Get(id string) (Record, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mutex := checkoutMutex(s.gibsonDir())
+	mutex.Lock()
+	defer mutex.Unlock()
 
-	state, err := s.currentState()
+	state, err := s.loadState()
 	if err != nil {
 		return Record{}, false
 	}
@@ -116,10 +142,11 @@ func (s *Store) Get(id string) (Record, bool) {
 }
 
 func (s *Store) List() []Record {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mutex := checkoutMutex(s.gibsonDir())
+	mutex.Lock()
+	defer mutex.Unlock()
 
-	state, err := s.currentState()
+	state, err := s.loadState()
 	if err != nil {
 		return nil
 	}
@@ -135,8 +162,45 @@ func (s *Store) List() []Record {
 	return records
 }
 
+func validateTransition(from, to Status) error {
+	if !from.valid() || !to.valid() {
+		return fmt.Errorf("invalid transition %q to %q", from, to)
+	}
+	if from == StatusClosed && to == StatusStopped {
+		return fmt.Errorf("invalid transition %q to %q", from, to)
+	}
+	return nil
+}
+
 func (s Status) valid() bool {
 	return s == StatusLive || s == StatusStopped || s == StatusClosed
+}
+
+func normalizeRecord(record Record) (Record, error) {
+	if record.ID == "" {
+		return Record{}, errors.New("id is required")
+	}
+	if !record.Status.valid() {
+		return Record{}, fmt.Errorf("session %q has invalid status %q", record.ID, record.Status)
+	}
+	createdAt, err := normalizeTimestamp(record.CreatedAt)
+	if err != nil {
+		return Record{}, fmt.Errorf("session %q createdAt: %w", record.ID, err)
+	}
+	lastActivityAt, err := normalizeTimestamp(record.LastActivityAt)
+	if err != nil {
+		return Record{}, fmt.Errorf("session %q lastActivityAt: %w", record.ID, err)
+	}
+	record.CreatedAt = createdAt
+	record.LastActivityAt = lastActivityAt
+	if record.Status == StatusLive {
+		if record.PID <= 0 {
+			return Record{}, fmt.Errorf("session %q live status requires a positive pid", record.ID)
+		}
+	} else {
+		record.PID = 0
+	}
+	return record, nil
 }
 
 func normalizeTimestamp(value string) (string, error) {
@@ -147,16 +211,32 @@ func normalizeTimestamp(value string) (string, error) {
 	return parsed.UTC().Format(time.RFC3339), nil
 }
 
-func (s *Store) currentState() (registry, error) {
-	if !s.loaded {
+func (s *Store) withStoreLock(action func() error) (err error) {
+	if err := s.EnsureLayout(); err != nil {
+		return err
+	}
+	mutex := checkoutMutex(s.gibsonDir())
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	lock, err := lockDirectory(s.gibsonDir())
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = errors.Join(err, lock.close())
+	}()
+	return action()
+}
+
+func (s *Store) withLockedState(update func(*registry) error) error {
+	return s.withStoreLock(func() error {
 		state, err := s.loadState()
 		if err != nil {
-			return registry{}, err
+			return err
 		}
-		s.state = state
-		s.loaded = true
-	}
-	return cloneRegistry(s.state), nil
+		return update(&state)
+	})
 }
 
 func (s *Store) loadState() (registry, error) {
@@ -178,28 +258,23 @@ func (s *Store) loadState() (registry, error) {
 	if state.Sessions == nil {
 		state.Sessions = make(map[string]Record)
 	}
-	return state, nil
-}
-
-func (s *Store) replaceState(state registry) error {
-	if err := writeRegistry(s.RegistryPath(), state); err != nil {
-		return err
+	for id, record := range state.Sessions {
+		if record.ID != id {
+			return registry{}, fmt.Errorf("decode registry %s: session key %q contains id %q", s.RegistryPath(), id, record.ID)
+		}
+		normalized, err := normalizeRecord(record)
+		if err != nil {
+			return registry{}, fmt.Errorf("decode registry %s: %w", s.RegistryPath(), err)
+		}
+		if normalized != record {
+			return registry{}, fmt.Errorf("decode registry %s: session %q is not normalized", s.RegistryPath(), id)
+		}
 	}
-	s.state = state
-	s.loaded = true
-	return nil
+	return state, nil
 }
 
 func newRegistry() registry {
 	return registry{Version: 1, Sessions: make(map[string]Record)}
-}
-
-func cloneRegistry(source registry) registry {
-	clone := registry{Version: source.Version, Sessions: make(map[string]Record, len(source.Sessions))}
-	for id, record := range source.Sessions {
-		clone.Sessions[id] = record
-	}
-	return clone
 }
 
 func writeRegistry(path string, state registry) error {
@@ -229,6 +304,14 @@ func writeRegistry(path string, state registry) error {
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace registry %s: %w", path, err)
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("open registry directory for sync: %w", err)
+	}
+	defer func() { _ = directory.Close() }()
+	if err := directory.Sync(); err != nil {
+		return fmt.Errorf("sync registry directory: %w", err)
 	}
 	return nil
 }
