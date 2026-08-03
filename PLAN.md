@@ -42,7 +42,7 @@ plan. Known planning inconsistencies are recorded in
 - [x] Chunk 4 — First human-drivable run
 - [x] Chunk 5 — Interruptible and crash-safe runs
 - [x] Chunk 6 — Named-checkout runs and storage hardening
-- [ ] Chunk 7 — Hostile records and extension boundaries
+- [x] Chunk 7 — Hostile records and extension boundaries
 - [ ] Chunk 8 — Complete M1 acceptance
 
 ## Chunk 1 — Reliable pi test environment
@@ -352,7 +352,7 @@ Chunks 1–5.
 
 ### Mandatory approval gate
 
-- [ ] Present named-checkout isolation and hardened on-disk evidence, then receive explicit
+- [x] Present named-checkout isolation and hardened on-disk evidence, then receive explicit
   approval before beginning Chunk 7.
 
 ## Chunk 7 — Hostile records and extension boundaries
@@ -362,21 +362,21 @@ Chunks 1–5.
 Prove the completed one-shot path against protocol records and extension behavior most
 likely to corrupt a subprocess integration, while keeping full dialog UX outside M1.
 
-- [ ] Add fake-pi scenarios for a single record larger than 1 MB and for a blocking
+- [x] Add fake-pi scenarios for a single record larger than 1 MB and for a blocking
   extension confirmation dialog, migrating Chunk 4's applicable scripted event tests to
   the real subprocess scenarios.
-- [ ] Prove large records, CRLF boundaries, final unterminated records, and embedded Unicode
+- [x] Prove large records, CRLF boundaries, final unterminated records, and embedded Unicode
   line separators survive the complete process boundary without truncation or splitting.
-- [ ] Send extension UI responses through the shared writer without waiting for a command
+- [x] Send extension UI responses through the shared writer without waiting for a command
   reply, and prove at the process layer that a response releases a blocked fake-pi dialog.
-- [ ] Keep `gibson run` deliberately unable to answer dialogs; emit a loud warning for
+- [x] Keep `gibson run` deliberately unable to answer dialogs; emit a loud warning for
   blocking requests and let Ctrl+C follow Chunk 5's durable abort path.
-- [ ] Exercise tool activity, notifications, agent-reported errors, backpressure, and close
+- [x] Exercise tool activity, notifications, agent-reported errors, backpressure, and close
   ordering through the composed application boundary.
-- [ ] Add a deterministic transport test proving that a response already demultiplexed for
+- [x] Add a deterministic transport test proving that a response already demultiplexed for
   its command wins when terminal closure races local write completion, while a fatal write
   failure still resolves pending commands consistently.
-- [ ] Preserve raw pi-owned JSON and valid session files throughout every hostile scenario.
+- [x] Preserve raw pi-owned JSON and valid session files throughout every hostile scenario.
 
 ### Dependencies
 
@@ -384,18 +384,27 @@ Chunks 1–6.
 
 ### Verification criteria
 
-- [ ] A valid record and resulting session file larger than 1 MB survive intact.
-- [ ] Unicode separators remain data rather than record boundaries across the subprocess.
-- [ ] A UI response releases the fake-pi dialog without corrupting concurrent protocol
+- [x] A valid record and resulting session file larger than 1 MB survive intact.
+- [x] Unicode separators remain data rather than record boundaries across the subprocess.
+- [x] A UI response releases the fake-pi dialog without corrupting concurrent protocol
   writes.
-- [ ] A blocking-dialog run warns visibly, exits 130 after Ctrl+C, persists the aborted
+- [x] A blocking-dialog run warns visibly, exits 130 after Ctrl+C, persists the aborted
   state, and leaves no orphan process.
-- [ ] Tool, notification, and error diagnostics stay on stderr while stdout remains only
+- [x] Tool, notification, and error diagnostics stay on stderr while stdout remains only
   assistant text.
-- [ ] Full event-channel backpressure and shutdown ordering remain race-clean.
-- [ ] The response-versus-closure transport contract is owned by a deterministic test
+- [x] Full event-channel backpressure and shutdown ordering remain race-clean.
+- [x] The response-versus-closure transport contract is owned by a deterministic test
   before D-017 changes command wait policy.
-- [ ] `make check` passes.
+- [x] `make check` passes.
+
+### Human proof
+
+- [x] Run `make cli-proof` from `~/Code/github.com/jmcampanini/gibson/main`; require its
+  compiled-binary huge-record and blocking-dialog evidence to show bounded output,
+  preserved artifacts, stdout/stderr separation, exit 130, aborted state, zero orphans,
+  and clean Git state, ending in `GIBSON_CLI_PROOF=PASS`.
+- [x] Capture that command and its verbatim output in
+  `.sandbox/demos/m1-chunk-7.html`.
 
 ### Mandatory approval gate
 

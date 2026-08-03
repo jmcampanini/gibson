@@ -44,12 +44,14 @@ type sessionHeader struct {
 }
 
 type entry struct {
-	Type      string   `json:"type"`
-	ID        string   `json:"id"`
-	ParentID  *string  `json:"parentId"`
-	Timestamp string   `json:"timestamp"`
-	Message   *message `json:"message,omitempty"`
-	Name      string   `json:"name,omitempty"`
+	Type       string   `json:"type"`
+	ID         string   `json:"id"`
+	ParentID   *string  `json:"parentId"`
+	Timestamp  string   `json:"timestamp"`
+	Message    *message `json:"message,omitempty"`
+	Name       string   `json:"name,omitempty"`
+	CustomType string   `json:"customType,omitempty"`
+	Data       any      `json:"data,omitempty"`
 }
 
 type message struct {
@@ -102,15 +104,19 @@ type fakePi struct {
 	isStreaming bool
 	sessionName string
 	activeRun   *scenarioRun
+	pendingUI   map[string]chan struct{}
 }
 
 type scenarioRun struct {
-	abort     chan struct{}
-	done      chan struct{}
-	user      message
-	text      string
-	aborted   bool
-	finalized bool
+	abort           chan struct{}
+	done            chan struct{}
+	user            message
+	text            string
+	promptID        json.RawMessage
+	promptCommand   string
+	promptResponded bool
+	aborted         bool
+	finalized       bool
 }
 
 type inputRecord struct {
@@ -252,6 +258,7 @@ func run(cfg config, scenario scenarios.Scenario, in io.Reader, out io.Writer) (
 		entries:     make([]entry, 0),
 		nextID:      1,
 		baseTime:    time.Now().UTC().Truncate(time.Millisecond),
+		pendingUI:   make(map[string]chan struct{}),
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
@@ -371,6 +378,11 @@ func (p *fakePi) handleLine(line []byte) error {
 }
 
 func (p *fakePi) acceptUIResponse(fields map[string]json.RawMessage) error {
+	var id string
+	if raw, ok := fields["id"]; !ok || json.Unmarshal(raw, &id) != nil || id == "" {
+		return errors.New("extension_ui_response id must be a non-empty string")
+	}
+
 	valid := false
 	if raw, ok := fields["value"]; ok {
 		var value string
@@ -391,6 +403,14 @@ func (p *fakePi) acceptUIResponse(fields map[string]json.RawMessage) error {
 	if !valid {
 		return errors.New("extension_ui_response requires a resolution")
 	}
+
+	p.mu.Lock()
+	pending := p.pendingUI[id]
+	if pending != nil {
+		delete(p.pendingUI, id)
+		close(pending)
+	}
+	p.mu.Unlock()
 	return nil
 }
 
@@ -505,17 +525,40 @@ func (p *fakePi) acceptPrompt(id json.RawMessage, command string, fields map[str
 		p.mu.Unlock()
 		return err
 	}
-	run := &scenarioRun{abort: make(chan struct{}), done: make(chan struct{}), user: userMessage}
+	run := &scenarioRun{
+		abort:         make(chan struct{}),
+		done:          make(chan struct{}),
+		user:          userMessage,
+		promptID:      id,
+		promptCommand: command,
+	}
 	p.activeRun = run
 	p.isStreaming = true
 	p.mu.Unlock()
 
-	if err := p.writeResponse(p.success(id, command, nil)); err != nil {
+	if p.scenario.DelayPromptUntilUIResponse {
+		go p.executeScenario(run)
+		return nil
+	}
+	if err := p.respondPrompt(run); err != nil {
 		p.finishRun(run)
 		return err
 	}
 	go p.executeScenario(run)
 	return nil
+}
+
+func (p *fakePi) respondPrompt(run *scenarioRun) error {
+	p.mu.Lock()
+	if run.promptResponded {
+		p.mu.Unlock()
+		return nil
+	}
+	run.promptResponded = true
+	id := cloneRaw(run.promptID)
+	command := run.promptCommand
+	p.mu.Unlock()
+	return p.writeResponse(p.success(id, command, nil))
 }
 
 func (p *fakePi) abort(id json.RawMessage) error {
@@ -558,7 +601,7 @@ func (p *fakePi) finishRun(run *scenarioRun) {
 func (p *fakePi) playScenario(run *scenarioRun) error {
 	var finalMessage message
 
-	for _, step := range p.scenario.Steps {
+	for index, step := range p.scenario.Steps {
 		if !p.waitForStep(run, step.Delay) {
 			return p.settleAborted(run)
 		}
@@ -572,7 +615,7 @@ func (p *fakePi) playScenario(run *scenarioRun) error {
 			}
 			p.isStreaming = true
 			p.mu.Unlock()
-			if err := p.writeOutput(map[string]any{"type": "agent_start"}); err != nil {
+			if err := p.writeScenarioOutput(step, map[string]any{"type": "agent_start"}); err != nil {
 				return err
 			}
 		case scenarios.MessageStart:
@@ -583,7 +626,7 @@ func (p *fakePi) playScenario(run *scenarioRun) error {
 			}
 			started := p.assistantMessageLocked("")
 			p.mu.Unlock()
-			if err := p.writeOutput(map[string]any{"type": "message_start", "message": started}); err != nil {
+			if err := p.writeScenarioOutput(step, map[string]any{"type": "message_start", "message": started}); err != nil {
 				return err
 			}
 		case scenarios.TextDelta:
@@ -594,7 +637,8 @@ func (p *fakePi) playScenario(run *scenarioRun) error {
 			}
 			run.text += step.Text
 			partial := p.assistantMessageLocked(run.text)
-			err := p.writeOutput(map[string]any{
+			p.mu.Unlock()
+			if err := p.writeScenarioOutput(step, map[string]any{
 				"type":    "message_update",
 				"message": partial,
 				"assistantMessageEvent": map[string]any{
@@ -603,9 +647,7 @@ func (p *fakePi) playScenario(run *scenarioRun) error {
 					"delta":        step.Text,
 					"partial":      partial,
 				},
-			})
-			p.mu.Unlock()
-			if err != nil {
+			}); err != nil {
 				return err
 			}
 		case scenarios.MessageEnd:
@@ -632,11 +674,11 @@ func (p *fakePi) playScenario(run *scenarioRun) error {
 			if err != nil {
 				return err
 			}
-			if err := p.writeOutput(map[string]any{"type": "message_end", "message": finalMessage}); err != nil {
+			if err := p.writeScenarioOutput(step, map[string]any{"type": "message_end", "message": finalMessage}); err != nil {
 				return err
 			}
 		case scenarios.AgentEnd:
-			if err := p.writeOutput(map[string]any{
+			if err := p.writeScenarioOutput(step, map[string]any{
 				"type":      "agent_end",
 				"messages":  []message{run.user, finalMessage},
 				"willRetry": false,
@@ -647,8 +689,95 @@ func (p *fakePi) playScenario(run *scenarioRun) error {
 			p.mu.Lock()
 			p.isStreaming = false
 			p.mu.Unlock()
-			if err := p.writeOutput(map[string]any{"type": "agent_settled"}); err != nil {
+			if err := p.writeScenarioOutput(step, map[string]any{"type": "agent_settled"}); err != nil {
 				return err
+			}
+		case scenarios.ToolStart:
+			if err := p.writeScenarioOutput(step, map[string]any{
+				"type": "tool_execution_start", "toolCallId": "tool-hostile-1", "toolName": "bash",
+				"args": map[string]any{"command": "printf hostile"},
+			}); err != nil {
+				return err
+			}
+		case scenarios.ToolUpdate:
+			if err := p.writeScenarioOutput(step, map[string]any{
+				"type": "tool_execution_update", "toolCallId": "tool-hostile-1", "toolName": "bash",
+				"args": map[string]any{"command": "printf hostile"},
+				"partialResult": map[string]any{
+					"content": []map[string]any{{"type": "text", "text": strings.Repeat(".", index)}},
+				},
+			}); err != nil {
+				return err
+			}
+		case scenarios.ToolEnd:
+			if err := p.writeScenarioOutput(step, map[string]any{
+				"type": "tool_execution_end", "toolCallId": "tool-hostile-1", "toolName": "bash",
+				"result":  map[string]any{"content": []map[string]any{{"type": "text", "text": "hostile complete"}}},
+				"isError": false,
+			}); err != nil {
+				return err
+			}
+		case scenarios.Notify:
+			if err := p.writeScenarioOutput(step, map[string]any{
+				"type": "extension_ui_request", "id": "fp-n-1", "method": "notify",
+				"message": step.Text, "notifyType": "warning",
+			}); err != nil {
+				return err
+			}
+		case scenarios.ExtensionError:
+			if err := p.writeScenarioOutput(step, map[string]any{
+				"type": "extension_error", "extensionPath": "hostile-extension.ts",
+				"event": "tool_call", "error": step.Text,
+			}); err != nil {
+				return err
+			}
+		case scenarios.AppendHugeEntry:
+			p.mu.Lock()
+			if run.aborted {
+				p.mu.Unlock()
+				return p.settleAborted(run)
+			}
+			timestamp := p.nextTimestampLocked()
+			err := p.appendEntryLocked(entry{
+				Type:       "custom",
+				ID:         p.newEntryIDLocked(),
+				ParentID:   cloneStringPointer(p.leafID),
+				Timestamp:  timestamp.Format(time.RFC3339Nano),
+				CustomType: "gibson-hostile-record",
+				Data: map[string]any{
+					"marker":  "huge-entry",
+					"payload": strings.Repeat("x", (1<<20)+1),
+				},
+			})
+			p.mu.Unlock()
+			if err != nil {
+				return err
+			}
+		case scenarios.ConfirmDialog:
+			resolved := make(chan struct{})
+			p.mu.Lock()
+			if run.aborted {
+				p.mu.Unlock()
+				return p.settleAborted(run)
+			}
+			p.pendingUI[step.ID] = resolved
+			p.mu.Unlock()
+			request := map[string]any{
+				"type": "extension_ui_request", "id": step.ID, "method": "confirm",
+				"title": "Fake extension confirmation", "message": step.Text,
+			}
+			if err := p.writeScenarioOutput(step, request); err != nil {
+				p.clearPendingUI(step.ID, resolved)
+				return err
+			}
+			select {
+			case <-resolved:
+				if err := p.respondPrompt(run); err != nil {
+					return err
+				}
+			case <-run.abort:
+				p.clearPendingUI(step.ID, resolved)
+				return p.settleAborted(run)
 			}
 		case scenarios.Crash:
 			return fmt.Errorf("scenario crash_mid_stream: deterministic crash after first delta")
@@ -657,6 +786,14 @@ func (p *fakePi) playScenario(run *scenarioRun) error {
 		}
 	}
 	return nil
+}
+
+func (p *fakePi) clearPendingUI(id string, pending chan struct{}) {
+	p.mu.Lock()
+	if p.pendingUI[id] == pending {
+		delete(p.pendingUI, id)
+	}
+	p.mu.Unlock()
 }
 
 func (p *fakePi) waitForStep(run *scenarioRun, delay time.Duration) bool {
@@ -678,6 +815,9 @@ func (p *fakePi) waitForStep(run *scenarioRun, delay time.Duration) bool {
 }
 
 func (p *fakePi) settleAborted(run *scenarioRun) error {
+	if err := p.respondPrompt(run); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	finalMessage := p.assistantMessageLocked(run.text)
 	finalMessage.StopReason = "aborted"
@@ -863,11 +1003,30 @@ func (p *fakePi) writeResponse(value response) error {
 }
 
 func (p *fakePi) writeOutput(value any) error {
+	return p.writeOutputRecord(value, []byte{'\n'}, false)
+}
+
+func (p *fakePi) writeScenarioOutput(step scenarios.Step, value any) error {
+	terminator := []byte{'\n'}
+	if step.CRLF {
+		terminator = []byte{'\r', '\n'}
+	}
+	return p.writeOutputRecord(value, terminator, step.LiteralUnicode)
+}
+
+func (p *fakePi) writeOutputRecord(value any, terminator []byte, literalUnicode bool) error {
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode protocol output: %w", err)
 	}
-	encoded = append(encoded, '\n')
+	if literalUnicode {
+		if bytes.Contains(encoded, []byte(`\\u2028`)) || bytes.Contains(encoded, []byte(`\\u2029`)) {
+			return errors.New("encode literal Unicode protocol output: textual separator escape is ambiguous")
+		}
+		encoded = bytes.ReplaceAll(encoded, []byte(`\u2028`), []byte("\u2028"))
+		encoded = bytes.ReplaceAll(encoded, []byte(`\u2029`), []byte("\u2029"))
+	}
+	encoded = append(encoded, terminator...)
 	p.outMu.Lock()
 	defer p.outMu.Unlock()
 	if _, err := p.out.Write(encoded); err != nil {

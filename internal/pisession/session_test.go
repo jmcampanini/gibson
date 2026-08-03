@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -244,6 +245,159 @@ func TestSessionTypedCommands(t *testing.T) {
 	require.Error(t, session.Prompt(ctx, "not sent", "invalid"))
 
 	require.NoError(t, session.Close(ctx))
+}
+
+func TestSessionHugeEntrySurvivesProcessBoundary(t *testing.T) {
+	t.Setenv("FAKEPI_SCENARIO", "huge_entry")
+	cfg := newSessionTestConfig(t, "s-20260803-hostile1")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	session, err := Spawn(ctx, cfg)
+	require.NoError(t, err)
+	cleanupSession(t, session)
+
+	stateRaw, err := session.GetState(ctx)
+	require.NoError(t, err)
+	var state struct {
+		SessionFile string `json:"sessionFile"`
+	}
+	require.NoError(t, json.Unmarshal(stateRaw, &state))
+	require.NoError(t, session.Prompt(ctx, "Exercise hostile records", ""))
+
+	var toolUpdates int
+	var unicodeRaw json.RawMessage
+	seen := make(map[string]bool)
+	for {
+		event := receiveSessionEvent(t, session.Events())
+		seen[event.Type] = true
+		if event.Type == "tool_execution_update" {
+			toolUpdates++
+		}
+		if event.Type == "message_update" {
+			unicodeRaw = append(json.RawMessage(nil), event.Raw...)
+		}
+		if event.Type == "agent_settled" {
+			break
+		}
+	}
+	assert.Equal(t, 1024, toolUpdates)
+	for _, eventType := range []string{
+		"tool_execution_start", "tool_execution_end", "extension_ui_request", "extension_error", "agent_settled",
+	} {
+		assert.True(t, seen[eventType], "missing %s", eventType)
+	}
+	require.Contains(t, string(unicodeRaw), "\u2028")
+	require.Contains(t, string(unicodeRaw), "\u2029")
+	assert.NotContains(t, string(unicodeRaw), `\u2028`)
+	assert.NotContains(t, string(unicodeRaw), `\u2029`)
+
+	entries, leafID, err := session.GetEntries(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+	assert.NotEmpty(t, leafID)
+	var hugeRaw json.RawMessage
+	for _, raw := range entries {
+		var head struct {
+			CustomType string `json:"customType"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &head))
+		if head.CustomType == "gibson-hostile-record" {
+			hugeRaw = raw
+		}
+	}
+	require.Greater(t, len(hugeRaw), 1<<20)
+	var huge struct {
+		Data struct {
+			Marker  string `json:"marker"`
+			Payload string `json:"payload"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(hugeRaw, &huge))
+	assert.Equal(t, "huge-entry", huge.Data.Marker)
+	assert.Len(t, huge.Data.Payload, (1<<20)+1)
+	assert.Empty(t, strings.Trim(huge.Data.Payload, "x"))
+	assertSessionFileMatchesEntries(t, state.SessionFile, cfg, entries)
+}
+
+func TestSessionRespondUIReleasesBlockedDialogAmidConcurrentCommands(t *testing.T) {
+	t.Setenv("FAKEPI_SCENARIO", "dialog_confirm")
+	cfg := newSessionTestConfig(t, "s-20260803-dialog1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	session, err := Spawn(ctx, cfg)
+	require.NoError(t, err)
+	cleanupSession(t, session)
+	acceptance, err := session.StartPrompt(ctx, "Ask first", "")
+	require.NoError(t, err)
+
+	var dialog Event
+	for dialog.Type != "extension_ui_request" {
+		dialog = receiveSessionEvent(t, session.Events())
+	}
+	var request struct {
+		ID     string `json:"id"`
+		Method string `json:"method"`
+	}
+	require.NoError(t, json.Unmarshal(dialog.Raw, &request))
+	assert.Equal(t, "fp-d-1", request.ID)
+	assert.Equal(t, "confirm", request.Method)
+	select {
+	case err := <-acceptance:
+		t.Fatalf("prompt resolved before dialog response: %v", err)
+	default:
+	}
+
+	start := make(chan struct{})
+	stateResult := make(chan error, 1)
+	responseResult := make(chan error, 1)
+	go func() {
+		<-start
+		_, err := session.GetState(ctx)
+		stateResult <- err
+	}()
+	go func() {
+		<-start
+		confirmed := true
+		responseResult <- session.RespondUI(request.ID, UIResolution{Confirmed: &confirmed})
+	}()
+	close(start)
+	require.NoError(t, <-responseResult)
+	require.NoError(t, <-stateResult)
+	require.NoError(t, <-acceptance)
+
+	for receiveSessionEvent(t, session.Events()).Type != "agent_settled" {
+	}
+	entries, _, err := session.GetEntries(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	var assistant struct {
+		Message struct {
+			StopReason string `json:"stopReason"`
+		} `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(entries[1], &assistant))
+	assert.Equal(t, "stop", assistant.Message.StopReason)
+}
+
+func TestSessionPreservesCRLFUnicodeAndFinalUnterminatedRecord(t *testing.T) {
+	finalRaw := []byte("{\"type\":\"final\",\"value\":\"left\u2028middle\u2029right\"}")
+	script := `printf '{"type":"crlf","value":"kept"}\r\n'; printf '%s' '` + string(finalRaw) + `'; exit 7`
+	session := startLifecycleProcess(t, script)
+
+	var events []Event
+	for event := range session.Events() {
+		events = append(events, event)
+	}
+	require.Len(t, events, 2)
+	assert.Equal(t, `{"type":"crlf","value":"kept"}`, string(events[0].Raw))
+	assert.Equal(t, finalRaw, []byte(events[1].Raw))
+	select {
+	case <-session.Done():
+	default:
+		t.Fatal("events closed before process completion")
+	}
 }
 
 func TestSessionAbortSlowStream(t *testing.T) {
