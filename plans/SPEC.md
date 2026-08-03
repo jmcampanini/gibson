@@ -130,9 +130,7 @@ All session data lives inside the checkout the session runs in:
 
 ### 5.1 One subprocess per live session
 
-- 5.1.1 A live session is backed by exactly one subprocess:
-  `pi --mode rpc --session-id <id> --session-dir <checkout>/.gibson/sessions [--model …] [--thinking …] [extra_args…]`
-  spawned with the target checkout as its working directory.
+- 5.1.1 A live session is backed by exactly one subprocess: `pi --mode rpc --session-id <id> --session-dir <checkout>/.gibson/sessions [--model …] [--thinking …] [extra_args…]` spawned with the target checkout as its working directory.
 - 5.1.2 Gibson assigns the session id (it MUST match pi's id rules: `^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`).
 - 5.1.3 **Single-writer rule:** pi does no session-file locking. Gibson's subprocess MUST be the only writer to a session's file. Gibson MUST NOT spawn two processes for the same session id.
 - 5.1.4 Pi stderr MUST be captured to `logs/<session-id>.stderr.log`.
@@ -157,8 +155,7 @@ All session data lives inside the checkout the session runs in:
 
 ## 6. Pi RPC integration
 
-Reference documentation ships inside the installed pi package — implementers MUST read it:
-`~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (also `sdk.md`, `session-format.md`). The facts below are the load-bearing subset.
+Reference documentation ships inside the installed pi package — implementers MUST read it: `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (also `sdk.md`, `session-format.md`). The facts below are the load-bearing subset.
 
 ### 6.1 Framing
 
@@ -171,7 +168,7 @@ Reference documentation ships inside the installed pi package — implementers M
 Commands are `{"id": "<optional-correlation-id>", "type": "<command>", …}`. Pi replies `{"type":"response","command":"<command>","id":…,"success":true|false,…}`. Commands gibson v1 uses:
 
 | Command | Notes |
-|---|---|
+| --- | --- |
 | `prompt` | `{message, images?, streamingBehavior?}`. `streamingBehavior: "steer" \| "followUp"` is REQUIRED when the agent is already streaming; the command errors otherwise. Response arrives when the prompt is accepted/queued, not when it completes. |
 | `steer` / `follow_up` | Dedicated variants of mid-stream sends. |
 | `abort` | Stops the current run; aborted assistant messages carry `stopReason:"aborted"`. |
@@ -213,7 +210,7 @@ The server exposes a JSON REST API plus one SSE stream per session. Exact paths 
 ### 7.1 REST actions
 
 | Endpoint (indicative) | Semantics |
-|---|---|
+| --- | --- |
 | `GET /api/config/session-types` | Session types from `gibson.toml` (name, description, model, thinking). |
 | `GET /api/checkouts` | Enumerated checkouts of the workspace. |
 | `GET /api/sessions` | All sessions across all checkouts: id, name, type, checkout, status (`idle` / `streaming` / `blocked-on-dialog` / `stopped` / `closed`), last activity. |
@@ -254,6 +251,7 @@ The server exposes a JSON REST API plus one SSE stream per session. Exact paths 
 **Launch flow**: choose session type (from config) + target checkout (from enumeration) + optional display name + first message.
 
 **Chat view**:
+
 - Markdown-rendered user and assistant messages.
 - Live streaming text (token deltas).
 - Thinking blocks collapsed by default, expandable.
@@ -314,4 +312,4 @@ All seven steps passing proves v1.
 - **10.2 SSE stream hygiene.** Heartbeat idle streams (§7.2.3); bound per-client buffers and drop slow clients (§7.2.4). A stalled phone must never block the pi pump.
 - **10.3 Dialog-blocked visibility.** A blocking dialog with no connected client simply waits (unless the extension set a timeout). With keep-alive processes this is correct — but the session list MUST surface `blocked-on-dialog` loudly so a waiting session is never invisible.
 - **10.4 `custom()` degradation.** Extensions using `ui.custom()` silently no-op over RPC. On this machine that affects: pi-review's triage UI, fuzzy-explorer, interactive-subagents' status screen, and pi-sidequest's command palette. Session types intended for web use should omit extensions whose core value is a custom TUI.
-- **10.5 Protocol churn.** Pi renamed its org and packages within months of this spec. Enforce and report the compatibility policy in §5.4, read the docs shipped with the *installed* version, and treat undocumented event fields as unstable.
+- **10.5 Protocol churn.** Pi renamed its org and packages within months of this spec. Enforce and report the compatibility policy in §5.4, read the docs shipped with the _installed_ version, and treat undocumented event fields as unstable.
