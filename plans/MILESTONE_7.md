@@ -1,5 +1,8 @@
 # MILESTONE_7 — v1 hardening and full acceptance
 
+Status: **provisional**. This forecast requires the plan-gate review in
+[PROCESS.md](PROCESS.md) before it becomes the active milestone contract.
+
 Conforms to MILESTONE_CONVENTIONS.md (binding) and SPEC.md (normative). Section numbers cited
 as "SPEC §n" and "CONV §n". This is the final milestone: its proof IS SPEC §9.5's
 seven-step agent-verified acceptance workflow, so passing this plan's proof workflow is
@@ -52,6 +55,11 @@ zeroed; CONV §5), history-from-JSONL for non-live sessions (CONV §3).
 
 If any precondition is missing or diverges from CONV, that is an M7 defect to fix during
 the triage loop (step 5.9), not a reason to redesign.
+
+Carried from M1 consolidation (resolve at this plan's gate): `internal/testws`
+hand-mirrors the config schema and its server encoder omits `bind`, so a scratch
+workspace with a non-localhost bind is inexpressible today. Add `WithBind` (or switch to
+encoding from `internal/config` types) before the multi-device proof.
 
 ---
 
@@ -181,6 +189,11 @@ checkout tree, not at the workspace root, not in sibling worktrees, and (because
 Allowed exceptions, by construction: `gibson.toml` and the `.gitignore` line are
 committed repo citizens created at workspace setup, not by Gibson (SPEC §3.1.1,
 §4.2.1).
+
+As part of this audit, re-evaluate whether log creation should use `O_NOFOLLOW` and
+whether directory setup needs stronger protection than the M1 `Lstat`-then-`Chmod`
+checks. M1's run path validates the layout before spawn, so this is defense in depth
+against same-user filesystem races rather than a prerequisite for the one-shot path.
 
 ### 4.6 Single-writer guard (SPEC §5.1.3, §10.1)
 

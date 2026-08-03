@@ -37,25 +37,7 @@ test: ## Run tests with the race detector.
 
 cli-proof: ## Build and verify the compiled CLI contract.
 	@$(MAKE) --no-print-directory build VERSION=cli-proof
-	@set -eu; \
-	test -x "$(BINARY)"; \
-	root_help="$$($(BINARY) --help)"; \
-	printf '%s\n' "$$root_help" | grep -Eq '^[[:space:]]+serve[[:space:]]'; \
-	version="$$($(BINARY) --version)"; \
-	test "$$version" = "gibson version cli-proof"; \
-	serve_help="$$($(BINARY) serve --help)"; \
-	printf '%s\n' "$$serve_help" | grep -Fq -- '--port'; \
-	printf '%s\n' "$$serve_help" | grep -Fq -- '--dev'; \
-	if error_output="$$($(BINARY) serve unexpected 2>&1)"; then \
-		echo "expected positional arguments to fail" >&2; \
-		exit 1; \
-	else \
-		error_rc=$$?; \
-	fi; \
-	test "$$error_rc" -eq 1; \
-	test "$$(printf '%s\n' "$$error_output" | wc -l | tr -d ' ')" -eq 1; \
-	case "$$error_output" in 'gibson: error: '*) ;; *) echo "missing process error prefix" >&2; exit 1;; esac; \
-	printf '%s\n' 'GIBSON_CLI_PROOF=PASS'
+	@BINARY=$(BINARY) ./scripts/cli-proof.sh
 
 lint: ## Run golangci-lint.
 	golangci-lint run $(PKG)

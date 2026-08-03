@@ -1,5 +1,8 @@
 # MILESTONE_5 — Extension dialogs and surfaces
 
+Status: **provisional**. This forecast requires the plan-gate review in
+[PROCESS.md](PROCESS.md) before it becomes the active milestone contract.
+
 Conforms to [MILESTONE_CONVENTIONS.md](MILESTONE_CONVENTIONS.md) (all §-references to "conventions"
 mean that file; "SPEC" means [SPEC.md](SPEC.md)). Scope is exactly MILESTONES.md M5.
 
@@ -29,9 +32,8 @@ milestone contracts through the shared seams.
   `RespondUI(id, resolution)` is already **implemented and exercised** by M1: its fakepi
   `dialog_confirm` scenario blocks until the response arrives on stdin and M1's tests
   drive it end-to-end, with the exported type
-  `pisession.UIResolution{Value *string; Confirmed *bool; Cancelled bool}` (MILESTONE_1 §6).
-  M5 consumes both as-is except for one deliberate amendment: `Cancelled` becomes
-  `*bool` (step 1 below). `internal/fakepi` + `pitest.BuildFakePi(t)` exist with the
+  `pisession.UIResolution{Value *string; Confirmed *bool; Cancelled *bool}` (conventions
+  §7). M5 consumes both as-is. `internal/fakepi` + `pitest.BuildFakePi(t)` exist with the
   scenario machinery (scenario via `FAKEPI_SCENARIO`, real v3 JSONL output), including
   the dialog await/response plumbing and the `dialog_confirm` scenario, which M5
   extends (§4.8).
@@ -47,11 +49,11 @@ milestone contracts through the shared seams.
 - **M3**: SPA skeleton — `src/api/{types,client,stream}.ts`, `sessionStore.ts` with the
   single `sessionReducer` code path (snapshot folded as synthetic events), `SessionPage`,
   `Composer`, a session list (`SessionListPage`) that renders `SessionSummary.status`,
-  and the web test runner M3 established (assumed Vitest; whatever M3 chose, M5 follows).
-- **M4**: full chat rendering; `Composer` offers steer/follow-up keyed off wire
-  `status === "streaming"` (MILESTONE_4 §4.6) — there is **no** client-side streaming flag
-  in the reducer yet. M5 must build one (§4.9, step 8), because M5's `blocked-on-dialog`
-  masking (§4.5) makes wire status the wrong key for the composer mid-run.
+  and Vitest, the web test runner pinned by conventions §9.
+- **M4**: full chat rendering, including the reducer's client-side `isStreaming` flag
+  (MILESTONE_4 §4.1, pinned in conventions §8) with the composer's steer/follow-up
+  keyed off it. M5 consumes that flag (§4.9); it is what keeps the composer correct
+  when M5's `blocked-on-dialog` masking (§4.5) hides `streaming` on the wire.
 
 Required reading for the implementer, verbatim per SPEC §6:
 `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (esp. "Extension
@@ -70,12 +72,10 @@ Server:
 - `internal/session/manager.go` — extended: `extension_ui_request` classification in the
   event pump, `AnswerDialog` implementation, status derivation gains the pending-dialog
   input, `History` populates `pendingDialog` + `uiState`, exit/close sweeps.
-- `internal/pisession/` (wherever M1 defined `UIResolution`) — **deliberate amendment
-  of M1's exported type**: `Cancelled bool` → `Cancelled *bool` (§4.4's validation must
-  distinguish an absent `cancelled` from an explicit `cancelled:false`, which is
-  rejected), plus a new `Validate(method string) error`; M1's marshal and
-  `dialog_confirm` tests are updated in the same change. `RespondUI` itself ships from
-  M1 unchanged.
+- `internal/pisession/` — a new `Validate(method string) error` on the conventions-§7
+  `UIResolution` type (its pointer `Cancelled` distinguishes an absent `cancelled`
+  from an explicit `cancelled:false`, which is rejected). `RespondUI` itself ships
+  from M1 unchanged.
 - `internal/httpapi/dialogs.go` (+ `_test.go`) — `POST /api/sessions/{id}/dialogs/{dialogId}`.
 - `internal/httpapi/sse.go` — connect-algorithm step 6 now also emits the pending
   `dialog` event (conventions §4.3.6).
@@ -99,11 +99,11 @@ Frontend (`web/src/`):
 - `api/types.ts` — `ExtensionUIRequest`, `DialogResolution`, `DialogResolvedData`,
   `UIState`; `api/client.ts` — `answerDialog()`.
 - `state/sessionStore.ts` — reducer handling for `dialog`, `dialog_resolved`, `ui`
-  event types; new state: `pendingDialog`, `uiState`, `toasts`, `editorText`, and
-  `isStreaming` derived from `pi` events (`agent_start` sets, `agent_settled` clears,
-  `agent_end` fallback — §4.9).
+  event types; new state: `pendingDialog`, `uiState`, `toasts`, `editorText`. Dialog
+  and composer behavior keys off the reducer's existing `isStreaming` flag (M4,
+  conventions §8 — §4.9).
 - Components: `DialogModal` (new), `ToastHost` (new), `StatusStrip` (new), `Composer`
-  (set_editor_text application; steer/follow-up and abort rekeyed off `isStreaming`),
+  (set_editor_text application; steer/follow-up and abort keyed off `isStreaming`),
   `SessionPage` (mount points), `SessionListPage` (loud `blocked-on-dialog` badge).
 
 ## 4. Design & rationale
@@ -440,7 +440,7 @@ data under `internal/fakepi/scenarios/`:
 
 | Scenario | Script on `prompt` |
 |---|---|
-| `dialog_confirm` (extends M1's) | `agent_start` → confirm request (`fp-d-1`) → **block** → on response: `notify` echoing `confirmed=<v>`, `entry_appended` assistant entry whose text encodes the resolution, `agent_end`, `agent_settled`. JSONL written as always. |
+| `dialog_confirm` (extends M1's) | `agent_start` → confirm request (`fp-d-1`) → **block** → on response: `notify` echoing `confirmed=<v>`, an assistant entry appended to the JSONL whose text encodes the resolution (surfaced by gibson's entry sync), `agent_end`, `agent_settled`. JSONL written as always. |
 | `dialog_all` | `agent_start` → select → confirm → input → editor (each awaited; each echoed via `notify <method>=<resolution>`) → `setStatus`/`setWidget`(with `widgetPlacement`)/`setTitle`/`set_editor_text` batch → summary entry → `agent_end`/`agent_settled`. |
 | `dialog_timeout` | `agent_start` → confirm request with `"timeout":1500` → wait ≤1.5s for a response; on none, **emit nothing** (pi's exact behavior) and proceed with the default (`false`): entry `confirmed=false (timeout)` → `agent_end` → `agent_settled`. Exercises gibson's run-end sweep. |
 
@@ -462,20 +462,20 @@ assigns `uiState` in the snapshot-init action:
   clear semantics as the server (§4.3), keeping `widgetPlacement` from live events;
   `set_editor_text` → `editorText = {text, seq: seq+1}`.
 - `status` → as in M2/M3, now including `blocked-on-dialog`.
-- `pi` → the reducer now also derives a client-side `isStreaming` flag:
+- `pi` → the reducer's existing `isStreaming` flag (M4 §4.1, pinned in conventions §8):
   `data.type === "agent_start"` sets it, `"agent_settled"` clears it, `"agent_end"`
   clears it as fallback if settled never arrives; the snapshot-init action seeds it
-  from the snapshot's wire status (`"streaming"` → `true`). M4 §4.6 keyed the composer
-  off wire status; M5's §4.5 masking breaks that key — a gated mid-run session reads
-  `blocked-on-dialog`, the inherited composer would offer plain Send, and pi rejects a
-  behavior-less mid-stream prompt (502). Streaming truth therefore moves client-side,
-  onto the agent events themselves.
+  from the snapshot's wire status (`"streaming"` → `true`). This client-side flag is
+  what M5's §4.5 masking depends on — a gated mid-run session reads
+  `blocked-on-dialog` on the wire, a wire-status-keyed composer would offer plain
+  Send, and pi rejects a behavior-less mid-stream prompt (502). Streaming truth stays
+  client-side, on the agent events themselves.
 
 Components:
 
 - **`DialogModal`** — rendered whenever `pendingDialog` is set; blocks nothing else on
   the page (the composer stays usable; steer-vs-follow-up is keyed off the reducer's
-  new `isStreaming` flag (above), *not* off `blocked-on-dialog` — a command-raised
+  `isStreaming` flag (above), *not* off `blocked-on-dialog` — a command-raised
   dialog is answerable while idle). Per method: `select` = title + one button per
   `options[]`; `confirm` = title + `message` + Confirm/Deny (→ `confirmed:true/false`);
   `input` = title + single-line input with `placeholder`; `editor` = title + textarea
@@ -496,9 +496,9 @@ Components:
   rendered as monospace line groups — `aboveEditor` group above the composer,
   `belowEditor` below (snapshot-restored widgets default to above, §4.3).
 - **`Composer`** — applies `editorText` when `seq` changes: replaces the draft.
-  Additionally rekeyed: the steer-vs-follow-up choice and the abort button's visibility
-  now follow `isStreaming` (falling back to `status === "streaming"` before any agent
-  event has been seen), replacing M4 §4.6's wire-status keying — so a gated mid-run
+  The steer-vs-follow-up choice and the abort button's visibility follow
+  `isStreaming` (M4 §4.6; falling back to `status === "streaming"` before any agent
+  event has been seen) — so a gated mid-run
   session (`blocked-on-dialog`, `isStreaming: true`) still offers Steer / Queue
   follow-up, and an idle session blocked on a command-raised dialog offers plain Send.
   M4's race-handling and queue-chip behavior are otherwise unchanged.
@@ -508,13 +508,12 @@ Components:
 
 ## 5. Implementation steps
 
-1. `internal/pisession/`: amend M1's exported `UIResolution` — `Cancelled bool` →
-   `Cancelled *bool` (deliberate change to M1's type: the §4.4/§7 validation must tell
-   an absent `cancelled` from an explicit `cancelled:false`, which is rejected); keep
-   `omitempty` JSON tags so marshaling still emits exactly one field; add
-   `Validate(method string) error` implementing §4.4's shape matrix; update M1's
-   marshal and `dialog_confirm` tests for the pointer change. `RespondUI` itself is
-   M1's, unchanged — it already marshals
+1. `internal/pisession/`: add `Validate(method string) error` to M1's exported
+   `UIResolution` (`{Value *string; Confirmed *bool; Cancelled *bool}`, conventions
+   §7), implementing §4.4's shape matrix — the pointer `Cancelled` distinguishes an
+   absent `cancelled` from an explicit `cancelled:false`, which is rejected; the
+   `omitempty` JSON tags already make marshaling emit exactly one field. `RespondUI`
+   itself is M1's, unchanged — it already marshals
    `{"type":"extension_ui_response","id":<id>, <exactly-one-field>}` through the
    single-writer goroutine, no correlation id, no reply awaited (conventions §6).
 2. `internal/fakepi/`: unmatched-id dropping + the scenario work of §4.8 (extend M1's
@@ -530,11 +529,10 @@ Components:
    `internal/httpapi/sse.go`: step-6 `dialog` prime. Register route in the mux.
 6. `test/fixtures/extensions/confirm-gate.ts` and `dialog-demo.ts` per §4.7.
 7. `web/src/api/types.ts` + `client.ts`: wire types and `answerDialog`.
-8. `web/src/state/sessionStore.ts`: the three new event types + snapshot fold, plus the
-   `isStreaming` derivation from `agent_start`/`agent_settled`/`agent_end` `pi` events
-   with the snapshot seed (§4.9).
+8. `web/src/state/sessionStore.ts`: the three new event types + snapshot fold, relying
+   on the reducer's existing `isStreaming` flag (M4, conventions §8 — §4.9).
 9. `web/src/components/`: `DialogModal.tsx`, `ToastHost.tsx`, `StatusStrip.tsx`;
-   `Composer` editorText application and steer/follow-up + abort rekeyed off
+   `Composer` editorText application and steer/follow-up + abort keyed off
    `isStreaming` (§4.9); `SessionPage` mounts; `SessionListPage` badge.
 10. Tests of §7 alongside each step; proof workflow of §8 last.
 
@@ -553,10 +551,9 @@ Exactly the conventions seams, now real (no new names beyond them except where n
   (conventions §7 name, signature now concrete) + exported errors
   `session.ErrDialogAlreadyAnswered`, `session.ErrDialogNotFound`.
 - `pisession.Session.RespondUI(id string, res pisession.UIResolution) error` (shipped
-  by M1) with `pisession.UIResolution` now `{Value *string; Confirmed *bool;
-  Cancelled *bool}` — M5's deliberate amendment of M1's exported type (step 1), plus
-  its new `Validate(method string) error`; the wire shape is pinned by conventions
-  §3/§4.2 and unchanged.
+  by M1) with `pisession.UIResolution` `{Value *string; Confirmed *bool;
+  Cancelled *bool}` (conventions §7), plus M5's new `Validate(method string) error`;
+  the wire shape is pinned by conventions §3/§4.2 and unchanged.
 - `test/fixtures/extensions/confirm-gate.ts` — the M7/SPEC §9.5 fixture, honoring
   optional env `CONFIRM_GATE_TIMEOUT_MS`.
 - fakepi scenarios `dialog_confirm` (M1's, extended per §4.8), `dialog_all`,
@@ -566,8 +563,8 @@ Exactly the conventions seams, now real (no new names beyond them except where n
 
 Unit (`testify`, table style, `_test.go` siblings):
 
-- `internal/pisession`: `UIResolution` marshal (exactly one field — M1's marshal tests
-  updated for the `Cancelled *bool` amendment) + `Validate` matrix (per-method
+- `internal/pisession`: `UIResolution` marshal (exactly one field — M1's existing
+  marshal tests) + `Validate` matrix (per-method
   accept/reject, `cancelled:false` rejected, two-fields rejected).
 - `internal/session/dialogs_test.go`: register/claim/404/409; **race test** — one
   pending dialog, 32 goroutines calling `AnswerDialog` concurrently, assert exactly one

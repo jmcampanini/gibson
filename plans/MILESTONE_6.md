@@ -1,5 +1,8 @@
 # MILESTONE_6 — Session management and restart resilience
 
+Status: **provisional**. This forecast requires the plan-gate review in
+[PROCESS.md](PROCESS.md) before it becomes the active milestone contract.
+
 Conforms to MILESTONE_CONVENTIONS.md (binding). SPEC.md is normative; section references
 below are to SPEC unless prefixed `CONV` (MILESTONE_CONVENTIONS.md) or `MS` (MILESTONES.md).
 
@@ -34,10 +37,12 @@ From **M1**:
   later minor or major version.
 - `internal/store`: `.gibson/` layout creation, `state.json` registry with the CONV §5
   schema (`version:1`, per-session `{id,name,type,status,createdAt,lastActivityAt,pid}`,
-  status `live|stopped|closed`), atomic write-temp-then-rename under an in-process
-  mutex, session id generation `s-<YYYYMMDD>-<6 [a-z0-9]>` with collision regeneration,
-  and `FindSessionFile(id)` locating a session's JSONL by its **header** id, never by
-  filename.
+  status `live|stopped|closed`), process-local serialization plus per-checkout
+  cross-process locking with reload-under-lock and atomic write-temp-then-rename
+  replacement, allocation-locked `CreateSession`, lifecycle-enforcing `SetLive` /
+  `SetStatus`, session id generation `s-<YYYYMMDD>-<6 [a-z0-9]>` with collision
+  regeneration, and `FindSessionFile(id)` locating a session's JSONL by its **header** id,
+  never by filename.
 - `internal/fakepi` + `internal/pitest` (`BuildFakePi(t)`) + `internal/testws`
   (`testws.New(t)`): fakepi answers `get_state/get_entries/get_session_stats/
   set_session_name/prompt/steer/follow_up/abort` and **writes a real v3 session JSONL**
@@ -79,6 +84,18 @@ From **M3–M5** (frontend and dialogs):
 If any assumption above diverges from the prior milestone's actual implementation,
 reconcile toward CONV §3–§7 — those are the binding seams; the notes here only locate
 where M6 picks up.
+
+Carried from M1 consolidation (resolve at this plan's gate):
+
+- **New registry mutations need a shared status applier first.** The startup orphan
+  sweep and resume paths add registry mutations beyond M1's four; before adding one,
+  extract a single `applyStatus` helper owning the live-PID and stopped/closed-PID-zero
+  rules plus transition validation, so a new mutation cannot silently miss a rule.
+- **fakepi cannot resume yet.** It opens its session file `O_TRUNC` and answers
+  `get_entries` from memory only, so a respawn with the same `--session-id` erases and
+  reports an empty session — M6's resume proof is unwritable until fakepi loads an
+  existing session file (header + entries, seeded leaf id, `O_APPEND`). Budget that
+  test-infra work in this plan.
 
 ## 3. Deliverables
 
@@ -264,6 +281,13 @@ Two layers enforce it:
 Corrupt `state.json` (unparsable JSON): rename to `state.json.corrupt-<unix-ts>`,
 rebuild per §4.1.2, log prominently. Registry lifecycle is M6's remit (MS coverage
 map §4) and silent data loss is worse than a quarantined file.
+
+M1 deliberately fails closed when a session JSONL has an empty, malformed, unreadable,
+or duplicate header, so the offending checkout requires manual repair before another
+session can be allocated. M6 owns a recovery policy as part of rebuild: preserve the
+original bytes, identify every affected path in a prominent diagnostic, and either
+quarantine or skip invalid files only under an explicit rebuild operation. Normal M1
+allocation remains strict; recovery must never discard a file silently.
 
 ### 4.5 History for non-live sessions: parse the JSONL (decided, justified)
 

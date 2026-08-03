@@ -2,12 +2,14 @@ package pisession
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestResolvePiBin(t *testing.T) {
@@ -17,12 +19,9 @@ func TestResolvePiBin(t *testing.T) {
 		t.Setenv("PATH", dir)
 
 		found, err := ResolvePiBin("")
-		if err != nil {
-			t.Fatalf("ResolvePiBin() error = %v", err)
-		}
-		if found != pi {
-			t.Fatalf("ResolvePiBin() = %q, want %q", found, pi)
-		}
+
+		require.NoError(t, err)
+		assert.Equal(t, pi, found)
 	})
 
 	t.Run("configured command on PATH", func(t *testing.T) {
@@ -31,25 +30,31 @@ func TestResolvePiBin(t *testing.T) {
 		t.Setenv("PATH", dir)
 
 		found, err := ResolvePiBin("project-pi")
-		if err != nil {
-			t.Fatalf("ResolvePiBin() error = %v", err)
-		}
-		if found != pi {
-			t.Fatalf("ResolvePiBin() = %q, want %q", found, pi)
-		}
+
+		require.NoError(t, err)
+		assert.Equal(t, pi, found)
+	})
+
+	t.Run("configured relative path becomes absolute", func(t *testing.T) {
+		dir := t.TempDir()
+		pi := writeExecutable(t, dir, "project-pi", "echo 0.82.0")
+		t.Chdir(dir)
+
+		found, err := ResolvePiBin("./project-pi")
+
+		require.NoError(t, err)
+		assert.True(t, filepath.IsAbs(found), "ResolvePiBin() = %q, want an absolute path", found)
+		assert.Equal(t, pi, found)
 	})
 
 	t.Run("empty PATH", func(t *testing.T) {
 		t.Setenv("PATH", "")
 
 		_, err := ResolvePiBin("")
-		if !errors.Is(err, ErrPiNotFound) {
-			t.Fatalf("ResolvePiBin() error = %v, want ErrPiNotFound", err)
-		}
+
+		require.ErrorIs(t, err, ErrPiNotFound)
 		for _, want := range []string{"PATH", "install pi", "configure pi_bin"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("ResolvePiBin() error = %q, want it to contain %q", err, want)
-			}
+			assert.ErrorContains(t, err, want)
 		}
 	})
 
@@ -57,13 +62,10 @@ func TestResolvePiBin(t *testing.T) {
 		t.Setenv("PATH", "")
 
 		_, err := ResolvePiBin("missing-pi")
-		if !errors.Is(err, ErrPiNotFound) {
-			t.Fatalf("ResolvePiBin() error = %v, want ErrPiNotFound", err)
-		}
+
+		require.ErrorIs(t, err, ErrPiNotFound)
 		for _, want := range []string{"configured pi_bin", "missing-pi", "executable path or command"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("ResolvePiBin() error = %q, want it to contain %q", err, want)
-			}
+			assert.ErrorContains(t, err, want)
 		}
 	})
 
@@ -74,9 +76,8 @@ func TestResolvePiBin(t *testing.T) {
 		t.Setenv("PATH", "")
 
 		_, err := ResolvePiBin("~/pi")
-		if !errors.Is(err, ErrPiNotFound) {
-			t.Fatalf("ResolvePiBin() error = %v, want ErrPiNotFound", err)
-		}
+
+		require.ErrorIs(t, err, ErrPiNotFound)
 	})
 }
 
@@ -139,25 +140,30 @@ func TestCheckPiVersion(t *testing.T) {
 			pi := writeExecutable(t, dir, "pi", "printf '%s\\n' "+shellQuote(test.output))
 
 			result, err := CheckPiVersion(context.Background(), pi)
+
 			if test.wantError != nil {
-				if !errors.Is(err, test.wantError) {
-					t.Fatalf("CheckPiVersion() error = %v, want %v", err, test.wantError)
-				}
+				require.ErrorIs(t, err, test.wantError)
 				for _, want := range test.wantMessage {
-					if !strings.Contains(err.Error(), want) {
-						t.Errorf("CheckPiVersion() error = %q, want it to contain %q", err, want)
-					}
+					assert.ErrorContains(t, err, want)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("CheckPiVersion() error = %v", err)
-			}
-			if result.Found != test.wantFound || result.Verified != test.wantVerified {
-				t.Errorf("CheckPiVersion() = %+v, want Found %q, Verified %t", result, test.wantFound, test.wantVerified)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, test.wantFound, result.Found)
+			assert.Equal(t, test.wantVerified, result.Verified)
 		})
 	}
+}
+
+func TestCheckPiVersionParsesStdoutOnly(t *testing.T) {
+	dir := t.TempDir()
+	pi := writeExecutable(t, dir, "pi", "echo 'warning: v9.9.9 wrapper is deprecated' >&2\necho 0.82.1")
+
+	result, err := CheckPiVersion(context.Background(), pi)
+
+	require.NoError(t, err)
+	assert.Equal(t, "0.82.1", result.Found)
+	assert.True(t, result.Verified)
 }
 
 func TestCheckPiVersionReportsCommandFailure(t *testing.T) {
@@ -165,12 +171,9 @@ func TestCheckPiVersionReportsCommandFailure(t *testing.T) {
 	pi := writeExecutable(t, dir, "pi", "echo unavailable >&2\nexit 7")
 
 	_, err := CheckPiVersion(context.Background(), pi)
-	if !errors.Is(err, ErrPiVersionExecution) {
-		t.Fatalf("CheckPiVersion() error = %v, want ErrPiVersionExecution", err)
-	}
-	if !strings.Contains(err.Error(), "unavailable") {
-		t.Errorf("CheckPiVersion() error = %q, want command output", err)
-	}
+
+	require.ErrorIs(t, err, ErrPiVersionExecution)
+	assert.ErrorContains(t, err, "unavailable")
 }
 
 func TestCheckPiVersionReportsTimeout(t *testing.T) {
@@ -178,27 +181,23 @@ func TestCheckPiVersionReportsTimeout(t *testing.T) {
 	pi := writeExecutable(t, dir, "pi", "exec sleep 10")
 
 	_, err := checkPiVersion(context.Background(), pi, 20*time.Millisecond)
-	if !errors.Is(err, ErrPiVersionTimeout) {
-		t.Fatalf("CheckPiVersion() error = %v, want ErrPiVersionTimeout", err)
-	}
+
+	require.ErrorIs(t, err, ErrPiVersionTimeout)
 }
 
 func TestCheckPiVersionReportsMissingExecutableAsExecutionFailure(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing-pi")
 
 	_, err := CheckPiVersion(context.Background(), missing)
-	if !errors.Is(err, ErrPiVersionExecution) {
-		t.Fatalf("CheckPiVersion() error = %v, want ErrPiVersionExecution", err)
-	}
+
+	require.ErrorIs(t, err, ErrPiVersionExecution)
 }
 
 func writeExecutable(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
 	contents := "#!/bin/sh\n" + body + "\n"
-	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
-		t.Fatalf("write executable: %v", err)
-	}
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o755))
 	return path
 }
 

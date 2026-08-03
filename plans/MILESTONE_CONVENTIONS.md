@@ -1,10 +1,16 @@
 # MILESTONE_CONVENTIONS
 
-Binding conventions for the remaining milestone plans (`MILESTONE_1.md` … `MILESTONE_7.md`),
-including the seams established by the current implementation. SPEC.md is normative for
-behavior; this file pins every cross-milestone seam SPEC.md left open so
-independently written plans compose. Where this file and SPEC.md conflict, SPEC.md wins.
-Plans MUST use these names, paths, and shapes verbatim — no local variants.
+Binding conventions for the remaining milestone plans (`MILESTONE_2.md` …
+`MILESTONE_7.md`), including the seams established by the current implementation.
+[PROCESS.md](PROCESS.md) governs plan authority, activation, execution, consolidation, and
+retirement. SPEC.md is normative for behavior; this file pins every cross-milestone seam
+SPEC.md left open so independently written plans compose. Where this file and SPEC.md
+conflict, SPEC.md wins.
+
+An active milestone file owns its outcomes and acceptance boundary; its implementation
+notes are suggestive. Root `PLAN.md` owns the active implementation, chunks, and
+verification. Inactive milestone files are provisional until their plan-gate review.
+All plans MUST use the names, paths, and shapes here verbatim — no local variants.
 
 ## 1. Module, layout, CLI, libraries
 
@@ -160,7 +166,8 @@ algorithm (server side, per client):
    (subscribe-before-fetch) or duplicated (fetched-id set).
 6. **Prime**: emit a `status` event with the current status, and, if a dialog is pending,
    a `dialog` event — so a pure SSE reconnect recovers actionable state without REST.
-7. Invalid cursor (pi returns `success:false`): send `reset`, close. Client refetches
+7. Invalid cursor (pi returns the exact `Entry not found: <since>` command failure): send
+   `reset`, close. Other command failures remain pi errors. The client refetches
    `/history` and reconnects fresh.
 
 **Deliberately lossy, by design:** deltas, tool updates, queue/status/ui events missed
@@ -218,8 +225,24 @@ field, so nothing goes stale on rename):
   (e.g. `s-20260726-k3v9qx`). Matches pi's id regex; date prefix makes ids scannable.
   Regenerate on collision against registry + `sessions/` contents. Gibson session id
   **is** the pi session id — one id, passed via `--session-id`.
-- Writes: in-process mutex + write-temp-then-rename (atomic). One server per workspace
-  makes cross-process locking unnecessary.
+- Writes: process-local serialization plus an advisory cross-process lock on the stable
+  per-checkout `.gibson/` directory itself; no lock file is created. Every read-modify-write mutation reloads the latest `state.json` while holding the lock and
+  completes its write-temp-then-rename replacement before unlocking. Readers therefore
+  see either the previous complete file or the next complete file, while concurrent
+  `gibson run` invocations—or a run overlapping the workspace server—cannot lose one
+  another's updates. One server still governs each workspace, but it is not the only
+  process that may mutate a checkout registry.
+- Fresh-session allocation holds that same lock from registry/header collision scanning
+  through pi readiness and the first live-record replacement. Startup is serialized only
+  within one checkout and creates no reservation artifact. A failed live replacement stops
+  the spawned process through its creation rollback before unlocking, then reconciles any
+  possibly committed record to stopped. Later ambiguous cleanup may stop only a live record
+  whose diagnostic pid matches the process being cleaned up.
+- Lifecycle transitions allow idempotent same-state writes plus `live→stopped|closed`,
+  `stopped→live|closed`, and `closed→live`; `closed→stopped` is invalid. Live requires a
+  positive diagnostic pid, and a same-state live write cannot replace a different live
+  pid; stopped and closed force pid zero. Status changes preserve all
+  other metadata.
 - Rebuild (SPEC §4.1.2): if `state.json` is missing, scan `sessions/*.jsonl`, take the id
   from each file's session header line and the name from the latest `session_info` entry;
   status `stopped`, type `""`, timestamps from header/mtime.
@@ -243,15 +266,34 @@ field, so nothing goes stale on rename):
   never blocks on downstream consumers directly (Broker buffers apply backpressure
   per-client, §4.3).
 - **Command correlation:** gibson sets `id` = `c-<n>` (per-process atomic counter) on
-  every command; a map `id → chan response` resolves replies; 30s default timeout →
-  `pi_error`. `extension_ui_response` writes use pi's request uuid and expect no reply.
+  every command; a map `id → chan response` resolves replies. Every outbound write has a
+  30-second bound and a write timeout is fatal to the transport. Ordinary commands keep
+  one 30-second budget across enqueue, write, and response → `pi_error`. The `prompt`
+  command family (including steer and follow-up sends) keeps the write bound but waits
+  for its response with **no transport deadline** — until caller cancellation, process
+  exit, or transport closure — because pre-acceptance extension dialogs may legitimately
+  block acceptance indefinitely (SPEC §§6.4.3, 10.3). The typed session layer owns this
+  wait policy; the transport never branches on command names.
+  Terminal output closure fails pending commands and closes input; a response
+  already demultiplexed for its command wins if closure races local write completion.
+  `extension_ui_response` writes use pi's request uuid and expect no reply.
 - **Spawn/readiness sequence (create or resume):** spawn → `get_state` as readiness probe
   → `set_session_name` (if name given at create) → `prompt`. REST create returns 201 only
   after the prompt is accepted.
-- **Shutdown sequence** (close, and server shutdown for each live session): SIGTERM →
-  wait up to 5s → SIGKILL; reap; close pipes; registry → `closed` (user close) or
-  `stopped` (server shutdown). Unexpected pi exit: registry → `stopped`, emit `status`
-  event, log tail of stderr at error level.
+- **Process ownership and shutdown:** pi runs in a dedicated process group so terminal
+  Ctrl+C reaches Gibson without preempting RPC abort. Close signals that group with
+  SIGTERM. Gibson tracks descendant ownership by PID plus a precise OS birth token,
+  validates each new candidate's live ancestry chain, stops discovery when the original
+  pi identity disappears, refreshes mutable PGID routing across detachment, and
+  revalidates before every signal. Linux uses pidfds for
+  individual signals when available. It signals a descendant group only with a current
+  owned witness. After 5s, forced escalation freezes pi, takes a final descendant
+  snapshot, and SIGKILLs owned descendants plus pi's group. The waiter reaps pi
+  independently of stdout EOF, drains final records for
+  up to 500ms, then closes the owned pipe so inherited descriptors cannot hang
+  completion. Registry → `closed`
+  (user close) or `stopped` (server shutdown). Unexpected pi exit: registry → `stopped`,
+  emit `status`, and log the stderr tail at error level.
 - **Version compatibility:** at startup run `pi --version`. The minimum is 0.82.0 and
   the 0.82.x line is verified. Versions below the minimum fail with an error naming the
   found and minimum versions; later minor or major versions are accepted and produce an unverified-line
@@ -267,6 +309,10 @@ needs it; do not add speculative implementations solely for a later plan.
   `GetState()`, `GetEntries(since)`, `GetSessionStats()`, `SetSessionName(name)`,
   `RespondUI(id, resolution)`, `Events() <-chan pisession.Event`, `Close(ctx)`.
   `pisession.Event` = `{Type string; Raw json.RawMessage}` (Type = pi's `type`).
+- `pisession.UIResolution` = `{Value *string; Confirmed *bool; Cancelled *bool}` (json
+  tags `value`/`confirmed`/`cancelled`, all `omitempty`) — the shared dialog-answer
+  shape for `RespondUI` and §3's dialog route body. All three fields are pointers so
+  validation can distinguish an absent field from an explicit `false`/empty value.
 - `session.Manager` — `Create(type, checkout, name, msg)`, `Get(id)`, `List()`,
   `Send(id, msg, behavior)`, `Abort(id)`, `AnswerDialog(id, dialogID, res)`,
   `CloseSession(id)`, `History(id, ...)`, `Subscribe(id) (*session.Subscription)`.
@@ -291,6 +337,13 @@ needs it; do not add speculative implementations solely for a later plan.
     provable. Deltas mutate an `inFlight` region keyed by `contentIndex`/`toolCallId`,
     always by replacement (cumulative partials); the finalized `entry` supersedes and
     clears it. React binding via `useReducer` + context; no Redux/Zustand.
+  - **Streaming state seam, pinned:** the reducer derives and owns a client-side
+    `isStreaming` boolean from `pi` events — set by `agent_start`, cleared by
+    `agent_settled` (`agent_end` as fallback). Streaming-dependent UI (the composer's
+    Steer/Queue affordances, dialog-adjacent behavior) keys off this flag, never off the
+    wire status enum: `blocked-on-dialog` masks `streaming`, and a session can be both
+    mid-stream and blocked at once. Wire status remains authoritative only for coarse
+    surfaces such as list badges.
 - Pinned libraries: `react-router-dom`, `react-markdown`. Nothing else without need.
 - Major surfaces (component names): `SessionListPage`, `LaunchFlow`, `SessionPage`;
   within chat: `MessageList`, `MessageCard`, `StreamingText`, `ThinkingBlock`,
@@ -352,6 +405,10 @@ confidence unavailable below, rather than duplicating lower-layer assertion matr
   (grove-cli idiom). No mocking frameworks; fakes and real subprocesses only.
 
 ## 10. Required remaining-milestone plan template
+
+Every numbered milestone plan MUST begin with one lifecycle status after its title:
+`active` for the current milestone or `provisional` for an inactive forecast. Activation
+requires the plan-gate review in PROCESS.md.
 
 Every remaining milestone plan MUST contain exactly these sections, in order:
 

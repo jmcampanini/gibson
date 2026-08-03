@@ -1,11 +1,16 @@
 package testws
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
+	"github.com/jmcampanini/gibson/internal/config"
 )
 
 const defaultConfig = `[server]
@@ -20,9 +25,65 @@ type WS struct {
 	Checkout string
 }
 
-func New(t testing.TB) *WS {
+type Option func(*options)
+
+type options struct {
+	piBin            string
+	configCustomized bool
+	sessionTypes     map[string]config.SessionType
+	siblingCheckouts map[string]struct{}
+}
+
+type encodedConfig struct {
+	Server   encodedServer                 `toml:"server"`
+	Sessions map[string]encodedSessionType `toml:"sessions"`
+}
+
+type encodedServer struct {
+	Port  int    `toml:"port"`
+	PiBin string `toml:"pi_bin,omitempty"`
+}
+
+type encodedSessionType struct {
+	Description string   `toml:"description"`
+	Model       string   `toml:"model,omitempty"`
+	Thinking    string   `toml:"thinking,omitempty"`
+	ExtraArgs   []string `toml:"extra_args,omitempty"`
+}
+
+func WithPiBin(path string) Option {
+	return func(opts *options) {
+		opts.piBin = path
+		opts.configCustomized = true
+	}
+}
+
+func WithSessionType(name string, cfg config.SessionType) Option {
+	return func(opts *options) {
+		opts.sessionTypes[name] = cfg
+		opts.configCustomized = true
+	}
+}
+
+func WithSiblingCheckout(name string) Option {
+	return func(opts *options) {
+		opts.siblingCheckouts[name] = struct{}{}
+	}
+}
+
+func New(t testing.TB, newOptions ...Option) *WS {
 	t.Helper()
 	isolateGitEnvironment(t)
+
+	opts := options{
+		sessionTypes: map[string]config.SessionType{
+			"test": {Description: "Test session"},
+		},
+		siblingCheckouts: make(map[string]struct{}),
+	}
+	for _, apply := range newOptions {
+		apply(&opts)
+	}
 
 	root := t.TempDir()
 	checkout := filepath.Join(root, "main")
@@ -32,13 +93,48 @@ func New(t testing.TB) *WS {
 
 	ws := &WS{Root: root, Checkout: checkout}
 	ws.runGit(t, "init", "-b", "main")
-	ws.WriteConfig(t, defaultConfig)
+	configSource := defaultConfig
+	if opts.configCustomized {
+		configSource = encodeConfig(t, opts)
+	}
+	ws.WriteConfig(t, configSource)
 	if err := os.WriteFile(filepath.Join(checkout, ".gitignore"), []byte(".gibson/\n"), 0o644); err != nil {
 		t.Fatalf("write test .gitignore: %v", err)
 	}
 	ws.runGit(t, "add", "gibson.toml", ".gitignore")
 	ws.runGit(t, "-c", "user.name=Gibson Tests", "-c", "user.email=gibson@example.invalid", "commit", "-m", "initial test workspace")
+
+	siblings := make([]string, 0, len(opts.siblingCheckouts))
+	for name := range opts.siblingCheckouts {
+		siblings = append(siblings, name)
+	}
+	sort.Strings(siblings)
+	for _, name := range siblings {
+		ws.runGit(t, "worktree", "add", filepath.Join(root, name))
+	}
 	return ws
+}
+
+func encodeConfig(t testing.TB, opts options) string {
+	t.Helper()
+	sessions := make(map[string]encodedSessionType, len(opts.sessionTypes))
+	for name, sessionType := range opts.sessionTypes {
+		sessions[name] = encodedSessionType{
+			Description: sessionType.Description,
+			Model:       sessionType.Model,
+			Thinking:    sessionType.Thinking,
+			ExtraArgs:   sessionType.ExtraArgs,
+		}
+	}
+	cfg := encodedConfig{
+		Server:   encodedServer{Port: 7311, PiBin: opts.piBin},
+		Sessions: sessions,
+	}
+	var source bytes.Buffer
+	if err := toml.NewEncoder(&source).Encode(cfg); err != nil {
+		t.Fatalf("encode test gibson.toml: %v", err)
+	}
+	return source.String()
 }
 
 func (ws *WS) WriteConfig(t testing.TB, source string) {

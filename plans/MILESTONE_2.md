@@ -1,5 +1,8 @@
 # MILESTONE_2 — Curl-drivable HTTP API
 
+Status: **provisional**. This forecast requires the plan-gate review in
+[PROCESS.md](PROCESS.md) before it becomes the active milestone contract.
+
 Implements MILESTONES.md M2 exactly. Governing documents: SPEC.md (normative behavior),
 MILESTONE_CONVENTIONS.md (binding, cited as CONV §n), pi's RPC reference at
 `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` (cited as rpc.md),
@@ -32,19 +35,25 @@ Manager boundary):
   `ReadBytes('\n')` framing, `c-<n>` command correlation with 30s timeout,
   SIGTERM→5s→SIGKILL shutdown. M2 additionally relies on:
   - `Events()` closing after process exit (so the pump can detect death).
-  - The ability to distinguish a **pi command failure** (`success:false` response — e.g.
-    `get_entries` with an unknown `since`, rpc.md "get_entries") from a transport/timeout
-    error. Assumed as a typed error (e.g. `pisession.CommandError`); if M1 shaped this
-    differently, wrap at the Manager boundary. This distinction drives the SSE `reset`
-    path (§4.5).
+  - `GetEntries` maps only pi's exact `Entry not found: <since>` response to
+    `pisession.ErrInvalidCursor`; unrelated command, transport, and timeout errors remain
+    distinct. This distinction drives the SSE `reset` path (§4.5).
   - Raw entries from `GetEntries` (verbatim `json.RawMessage` per CONV §2); M2 extracts
     each entry's `id` itself with a minimal `{"id":...}` unmarshal, so it does not depend
     on M1 having parsed entries.
 - `internal/store`: `.gibson/` layout creation, `state.json` registry read-modify-write
-  (mutex + write-temp-then-rename, CONV §5), session id generation
+  (process-local serialization plus per-checkout cross-process locking,
+  reload-under-lock, and write-temp-then-rename replacement; CONV §5), session id
+  generation
   (`s-<YYYYMMDD>-<6 [a-z0-9]>` with collision regeneration), registry record shape per
-  CONV §5. Assumed surface: `store.Open(checkoutPath)` returning a handle with
-  `List() / Get(id) / Put(record)` and layout/log-path helpers.
+  CONV §5. Surface: `store.Open(checkoutPath)` returning a handle with strict
+  `List() ([]Record, error)` / `Get(id) (Record, bool, error)`, `Put(record)`,
+  context-cancellable allocation-locked `CreateSession`, `SetLive`, and layout/log-path
+  helpers. Before the HTTP surface adopts these reads, M2 must choose between
+  context-aware `Get`/`List` calls that cancel same-process waits behind `CreateSession`
+  and lock-free atomic-snapshot reads. Cross-process allocation locking polls every 10 ms and
+  has no FIFO fairness guarantee; that remains acceptable for one server plus occasional
+  one-shot CLIs unless M2 proof exposes user-visible contention.
 - `internal/fakepi` + `internal/pitest`: fakepi binary honoring `--session-id` /
   `--session-dir`, writing a real v3 session JSONL, answering `get_state`, `get_entries`
   (including `since` and `success:false` on unknown cursor), `get_session_stats`,
@@ -97,14 +106,14 @@ so late SSE subscribers and `/history` still work; the handle map is the guard t
 enforces one-process-per-id (SPEC §5.1.3 — `Create` ids are fresh, and M2 has no respawn
 path at all).
 
-**Create flow** (CONV §6 sequence, exact): generate id via store → spawn pi with the
-pinned argv in the target checkout → write registry record `{status:"live", pid}` with
-the spawned pid (spawn-then-record, matching M1 §4.9) → `get_state` readiness probe
-(also caches `sessionFile` from its response for §4.6) → `set_session_name` if a name
-was given → `prompt` with the first message → return 201 only after the prompt is
-accepted (rpc.md: the `prompt` response means accepted/queued, not completed). On any
-failure before prompt acceptance: best-effort kill, remove the registry record if it was
-written, return `pi_error` (local decision, §4.10).
+**Create flow** (CONV §6 sequence, exact): enter M1's allocation-locked `CreateSession`
+callback → generate the id → spawn pi with the pinned argv in the target checkout →
+`get_state` readiness probe (also caches `sessionFile` from its response for §4.6) →
+atomically write `{status:"live", pid}` and release the allocation lock →
+`set_session_name` if a name was given → `prompt` with the first message → return 201 only
+after the prompt is accepted (rpc.md: the `prompt` response means accepted/queued, not
+completed). On any failure before prompt acceptance: best-effort kill, remove or stop the
+registry record if it was written, return `pi_error` (local decision, §4.10).
 
 **Pump goroutine** (one per live handle): `for ev := range sess.Events()` — classify
 (§4.4), update status state, apply registry side effects, publish to the Broker. The pump
@@ -165,13 +174,19 @@ fallback. Every wire-status transition publishes a `status` event
 
 ### 4.4 Event classification (pi → StreamEvent)
 
-The pump maps each `pisession.Event` to exactly one `session.StreamEvent` (CONV §7) using
-the pinned taxonomy (CONV §4.2); payloads stay verbatim `json.RawMessage` (CONV §2,
+Durable `entry` StreamEvents are not mapped from any single pi event: pi emits no
+per-append event for ordinary entries, so the session process runs the pinned entry-feed
+sync (SPEC §6.3, CONV §4.2) — on each persistence-signal event (`message_end`,
+`entry_appended`, `session_info_changed`, `compaction_end`, `agent_end`/`agent_settled`)
+it calls `get_entries {since: syncCursor}`, broadcasts each newly returned entry as an
+`entry` StreamEvent (`EntryID` = entry id, `Data` = the entry verbatim, bumping
+`lastActivityAt`), and advances the cursor. The trigger events themselves still ride the
+`pi` lane verbatim. The pump maps every other `pisession.Event` to exactly one
+`session.StreamEvent` (CONV §7); payloads stay verbatim `json.RawMessage` (CONV §2,
 churn guard SPEC §10.5):
 
 | pi event | StreamEvent | notes |
 |---|---|---|
-| `entry_appended` | `entry`, `EntryID` = `entry.id`, `Data` = the entry verbatim | the only durable event; also bumps `lastActivityAt` |
 | `extension_ui_request` method `select\|confirm\|input\|editor` | `dialog` (request verbatim) | forwarded so the wire contract is stable from day one; the pending-dialog registry, resolution, and answer route are M5 |
 | `extension_ui_request` other methods | `ui` (request verbatim) | `notify`/`setStatus`/`setWidget`/`setTitle`/`set_editor_text` (rpc.md fire-and-forget) |
 | `session_info_changed` | `pi` | side effect first: mirror `name` into the registry (CONV §5) |
@@ -245,12 +260,11 @@ closes the duplicate window.
    returns exactly the missed entries; replay covers them; no dupes by the same
    mechanism as first attach.
 4. **Cursor == current leaf:** fetch returns zero entries (valid); prime + live.
-5. **Invalid cursor:** live session → pi answers `get_entries` with `success:false`
-   (rpc.md); non-live → cursor not found in the file. Both map to `ErrInvalidCursor` →
-   `reset` event `{"reason":"invalid_cursor"}` → close (CONV §4.2/§4.3 step 7). Any pi
-   command failure on this fetch is treated as invalid-cursor (it is the only documented
-   failure mode; worst case the client harmlessly refetches). Transport errors instead
-   end the stream without `reset`.
+5. **Invalid cursor:** live session → pi answers `get_entries` with its exact
+   `Entry not found: <since>` failure; non-live → cursor not found in the file. Both map
+   to `ErrInvalidCursor` → `reset` event `{"reason":"invalid_cursor"}` → close
+   (CONV §4.2/§4.3 step 7). Other pi command failures remain pi errors and end the stream
+   without `reset`, as do transport errors.
 6. **Overflow during a long replay:** the subscriber may be kicked while the handler is
    still replaying; the handler sees the closed channel at drain/live and terminates.
    Self-healing: the client reconnects with a further-along cursor, so each retry replays
@@ -378,13 +392,46 @@ Decisions local to M2 (not pinned by CONV; flagged per CONV §10):
    surface via CONV §5 rebuild semantics in M6.
 4. **Close idempotency** (200, current summary) and **list ordering**
    (`lastActivityAt` desc).
-5. **Any pi failure on the SSE fetch ⇒ `reset`** (§4.5 case 5) — pi documents no other
-   `get_entries` failure mode.
 
 Open question for the conventions author (does not block M2): whether `GET /api/sessions`
 should mark handle-less `live` registry records as `stopped` *in the response* before
 M6's startup sweep exists. M2 passes them through the pinned derivation (→ `idle`) to
 avoid pre-deciding M6's cleanup semantics.
+
+### 4.11 Carried from M1 consolidation
+
+Dispositions from the M1 foundation-review triage; resolve at this plan's gate or in the
+noted chunk:
+
+- **Chunk 0 — foundation reshaping before new capability.** M2 opens with a chunk that
+  (a) extracts the one-shot run loop's abort → durable-settlement → close protocol from
+  `internal/app/run.go` into an explicit state machine both `run` and the Manager
+  consume; (b) adds a startup step-runner so pre-prompt interrupt checks are structural
+  rather than hand-placed; (c) teaches fakepi mid-stream sends (`steer`/`follow_up` via
+  `streamingBehavior`) and makes abort-response ordering a scenario knob
+  (respond-immediately default; respond-after-settle retained for the durable-abort
+  proof).
+- **`CommandError` export:** pi-declared command failures are an unexported transport
+  type; export an `errors.As`-able type when building the `pi_error` (502) envelope
+  mapping rather than classifying by elimination.
+- **Registry read surface:** `store.Get`/`List` currently serialize behind
+  `CreateSession`'s spawn-through-readiness window on the in-process checkout lock. Make
+  reads lock-free (atomic-snapshot semantics, as cross-process readers already have)
+  when M2 adopts the read surface, with concurrent-handler tests at this layer.
+- **Descendant-tracker cost model:** every session scans the whole process table each
+  50ms (hardcoded constant). Decide shared-machine-scanner vs on-demand capture before
+  the Manager holds many long-lived sessions; while reworking, close the narrow
+  frozen-orphan window (killTree SIGSTOPs pi's group and never SIGCONTs an unowned
+  stopped member).
+- **Prompt-response disposition, upstream:** pursue with pi an explicit prompt
+  acceptance/disposition signal that could replace unbounded response waits and
+  state inference (D-017 carry; conventions §6 pins the shipped shape).
+- **`GetEntries` empty-vs-missing:** a missing `entries` key and an empty list are
+  indistinguishable to callers; decide whether M2 replay semantics need the distinction.
+- **Wait-policy refactor precondition:** before altering transport wait policy or
+  acceptance semantics, extract `commandWithWritePolicy`'s write/await phases, give the
+  `StartPrompt` written-result handshake one owner, and convert the white-box transport
+  tests that pin those internals.
 
 ## 5. Implementation steps
 
