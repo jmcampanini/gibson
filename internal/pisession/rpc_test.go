@@ -472,6 +472,97 @@ func TestRPCPromptWriteTimeoutIsFatal(t *testing.T) {
 	waitFor(t, client.pumpDone, "RPC pump")
 }
 
+func TestRPCDemultiplexedResponseWinsTerminalClosureRace(t *testing.T) {
+	input, source := io.Pipe()
+	writer := newGatedWriteCloser(nil)
+	client := newRPCClient(input, writer, nil)
+	client.commandTimeout = time.Minute
+	t.Cleanup(func() {
+		writer.release()
+		_ = source.Close()
+		client.close()
+	})
+
+	var data json.RawMessage
+	var commandErr error
+	commandDone := make(chan struct{})
+	go func() {
+		data, commandErr = client.command(context.Background(), "get_state", nil)
+		close(commandDone)
+	}()
+	waitFor(t, writer.entered, "gated command write")
+
+	var command struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(writer.Bytes()), &command))
+	require.NotEmpty(t, command.ID)
+	response := []byte(fmt.Sprintf(
+		`{"id":%q,"type":"response","command":"get_state","success":true,"data":{"state":"ready"}}`,
+		command.ID,
+	))
+	require.True(t, client.demux(response))
+
+	require.NoError(t, source.Close())
+	waitFor(t, client.pumpDone, "RPC pump")
+	waitFor(t, writer.closed, "RPC writer close")
+	waitFor(t, commandDone, "RPC command")
+	require.NoError(t, commandErr)
+	assert.JSONEq(t, `{"state":"ready"}`, string(data))
+
+	writer.release()
+	waitFor(t, client.writerDone, "RPC writer")
+}
+
+func TestRPCFatalWriteFailureResolvesAllPendingCommands(t *testing.T) {
+	input, source := io.Pipe()
+	writeErr := errors.New("fatal write failure")
+	writer := newGatedWriteCloser(writeErr)
+	client := newRPCClient(input, writer, nil)
+	client.commandTimeout = time.Minute
+	t.Cleanup(func() {
+		writer.release()
+		_ = source.Close()
+		client.close()
+	})
+
+	const commandCount = 4
+	results := make([]error, commandCount)
+	done := make([]chan struct{}, commandCount)
+	startCommand := func(index int) {
+		done[index] = make(chan struct{})
+		go func() {
+			_, results[index] = client.command(context.Background(), fmt.Sprintf("operation-%d", index), nil)
+			close(done[index])
+		}()
+	}
+
+	startCommand(0)
+	waitFor(t, writer.entered, "gated command write")
+	for index := 1; index < commandCount; index++ {
+		startCommand(index)
+	}
+	require.Eventually(t, func() bool {
+		client.pendingMu.Lock()
+		defer client.pendingMu.Unlock()
+		return len(client.pending) == commandCount
+	}, 5*time.Second, time.Millisecond)
+
+	writer.release()
+	for index := range commandCount {
+		waitFor(t, done[index], fmt.Sprintf("RPC command %d", index))
+		require.ErrorIs(t, results[index], writeErr)
+	}
+	for index := 1; index < commandCount; index++ {
+		assert.Equal(t, results[0].Error(), results[index].Error())
+	}
+	waitFor(t, writer.closed, "RPC writer close")
+	waitFor(t, client.writerDone, "RPC writer")
+
+	require.NoError(t, source.Close())
+	waitFor(t, client.pumpDone, "RPC pump")
+}
+
 func TestRPCWriterCompletesShortWritesAndReportsFailures(t *testing.T) {
 	t.Run("short writes", func(t *testing.T) {
 		input, source := io.Pipe()
@@ -643,6 +734,54 @@ func (w *blockingWriteCloser) Write([]byte) (int, error) {
 }
 
 func (w *blockingWriteCloser) Close() error {
+	w.closeOnce.Do(func() { close(w.closed) })
+	return nil
+}
+
+type gatedWriteCloser struct {
+	mu          sync.Mutex
+	value       bytes.Buffer
+	err         error
+	entered     chan struct{}
+	released    chan struct{}
+	closed      chan struct{}
+	enterOnce   sync.Once
+	releaseOnce sync.Once
+	closeOnce   sync.Once
+}
+
+func newGatedWriteCloser(err error) *gatedWriteCloser {
+	return &gatedWriteCloser{
+		err:      err,
+		entered:  make(chan struct{}),
+		released: make(chan struct{}),
+		closed:   make(chan struct{}),
+	}
+}
+
+func (w *gatedWriteCloser) Write(value []byte) (int, error) {
+	w.mu.Lock()
+	_, _ = w.value.Write(value)
+	w.mu.Unlock()
+	w.enterOnce.Do(func() { close(w.entered) })
+	<-w.released
+	if w.err != nil {
+		return 0, w.err
+	}
+	return len(value), nil
+}
+
+func (w *gatedWriteCloser) Bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]byte(nil), w.value.Bytes()...)
+}
+
+func (w *gatedWriteCloser) release() {
+	w.releaseOnce.Do(func() { close(w.released) })
+}
+
+func (w *gatedWriteCloser) Close() error {
 	w.closeOnce.Do(func() { close(w.closed) })
 	return nil
 }

@@ -249,6 +249,86 @@ func TestRunCrashWithFakePiReportsStderrAndCleansRegistry(t *testing.T) {
 	}
 }
 
+func TestRunRoutesHostileFakePiRecordsAfterConsumerBackpressure(t *testing.T) {
+	t.Setenv("FAKEPI_SCENARIO", "huge_entry")
+	piBin := pitest.BuildFakePi(t)
+	ws := testws.New(t,
+		testws.WithPiBin(piBin),
+		testws.WithSessionType("quick", config.SessionType{Description: "Quick task"}),
+	)
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	dependencies.resolvePiBin = pisession.ResolvePiBin
+	dependencies.checkPiVersion = pisession.CheckPiVersion
+	spawned := make(chan *pisession.Session, 1)
+	dependencies.spawn = func(ctx context.Context, cfg pisession.Config) (runSession, error) {
+		session, err := pisession.Spawn(ctx, cfg)
+		if err == nil {
+			spawned <- session
+		}
+		return session, err
+	}
+	stderr := newBlockingDiagnosticWriter("[tool bash] running")
+	t.Cleanup(stderr.release)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var stdout bytes.Buffer
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(ctx, RunOptions{
+			Type: "quick", Message: "Exercise hostile records", Stdout: &stdout, Stderr: stderr,
+		}, log.New(stderr), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
+
+	var session *pisession.Session
+	select {
+	case session = <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not expose its spawned pi session")
+	}
+	waitRunSignal(t, stderr.blocked, "blocked tool diagnostic")
+	waitRunEventChannelFull(t, session.Events())
+	select {
+	case got := <-finished:
+		t.Fatalf("run bypassed application backpressure: outcome=%v err=%v", got.outcome, got.err)
+	default:
+	}
+	stderr.release()
+
+	select {
+	case got := <-finished:
+		require.NoError(t, got.err)
+		assert.Equal(t, RunCompleted, got.outcome)
+	case <-time.After(10 * time.Second):
+		t.Fatal("hostile run did not finish after backpressure was released")
+	}
+	assert.Equal(t, "Unicode: left\u2028middle\u2029right.\n", stdout.String())
+	assert.NotContains(t, stdout.String(), "[tool")
+	assert.NotContains(t, stdout.String(), "[notify]")
+	assert.NotContains(t, stdout.String(), "[error]")
+	assert.Contains(t, stderr.String(), "[tool bash] running")
+	assert.Contains(t, stderr.String(), "[tool bash] done")
+	assert.Contains(t, stderr.String(), "[notify] hostile record notification")
+	assert.Contains(t, stderr.String(), "[error] extension hostile-extension.ts: deterministic extension failure")
+
+	files, err := filepath.Glob(filepath.Join(ws.Checkout, ".gibson", "sessions", "*.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	sessionFile, err := os.Stat(files[0])
+	require.NoError(t, err)
+	assert.Greater(t, sessionFile.Size(), int64(1<<20))
+	registry := readRunRegistry(t, ws.Checkout)
+	for _, record := range registry.Sessions {
+		assert.Equal(t, store.StatusStopped, record.Status)
+		assert.Zero(t, record.PID)
+	}
+}
+
 func TestRunRejectsUnknownTypeBeforeSpawningPi(t *testing.T) {
 	ws := testws.New(t,
 		testws.WithSessionType("review", config.SessionType{Description: "Review"}),
@@ -313,34 +393,57 @@ func TestRunPresenterKeepsAssistantTextSeparateFromDiagnostics(t *testing.T) {
 	assert.Contains(t, stderr.String(), "extension review.ts: failed")
 }
 
-func TestRunPresentsDialogWarningWhilePromptAcceptanceIsPending(t *testing.T) {
-	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+func TestRunWarnsAndDurablyAbortsBlockedFakePiDialog(t *testing.T) {
+	t.Setenv("FAKEPI_SCENARIO", "dialog_confirm")
+	piBin := pitest.BuildFakePi(t)
+	ws := testws.New(t,
+		testws.WithPiBin(piBin),
+		testws.WithSessionType("quick", config.SessionType{Description: "Quick"}),
+	)
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
-	releasePrompt := make(chan struct{})
-	stderr := &dialogReleaseWriter{release: releasePrompt}
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
-		events := make(chan pisession.Event, 1)
-		session := newScriptedRunSession(cfg, events)
-		session.prompt = func(ctx context.Context, _, _ string) error {
-			events <- runEvent("extension_ui_request", `{"type":"extension_ui_request","method":"confirm","message":"Continue?"}`)
-			select {
-			case <-releasePrompt:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		return session, nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	dependencies.resolvePiBin = pisession.ResolvePiBin
+	dependencies.checkPiVersion = pisession.CheckPiVersion
+	interrupts := make(chan os.Signal, 2)
+	dependencies.interrupts = interrupts
+	stderr := newObservedDiagnosticWriter("cannot answer dialogs")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	var stdout bytes.Buffer
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(ctx, RunOptions{
+			Type: "quick", Message: "/dialog", Stdout: &stdout, Stderr: stderr,
+		}, log.New(stderr), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
 
-	outcome, err := run(ctx, RunOptions{Type: "quick", Message: "/dialog", Stderr: stderr}, log.New(&bytes.Buffer{}), dependencies)
+	waitRunSignal(t, stderr.observed, "blocking dialog warning")
+	interrupts <- os.Interrupt
+	select {
+	case got := <-finished:
+		require.NoError(t, got.err)
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(10 * time.Second):
+		t.Fatal("dialog run did not finish durable abort")
+	}
 
-	require.NoError(t, err)
-	assert.Equal(t, RunCompleted, outcome)
+	assert.Empty(t, stdout.String())
 	assert.Contains(t, stderr.String(), "[warning] pi is waiting for a confirm dialog; gibson run cannot answer dialogs")
+	assert.Contains(t, stderr.String(), "status=stopped")
+	sessionFiles, err := filepath.Glob(filepath.Join(ws.Checkout, ".gibson", "sessions", "*.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, sessionFiles, 1)
+	assert.Equal(t, []string{"aborted"}, assistantStopReasons(t, sessionFiles[0]))
+	registry := readRunRegistry(t, ws.Checkout)
+	for _, record := range registry.Sessions {
+		assert.Equal(t, store.StatusStopped, record.Status)
+		assert.Zero(t, record.PID)
+	}
 }
 
 func TestRunFinishesPromptHandledWithoutAgentRun(t *testing.T) {
@@ -1223,18 +1326,94 @@ func waitRunSignal(t testing.TB, signal <-chan struct{}, name string) {
 	}
 }
 
-type dialogReleaseWriter struct {
-	bytes.Buffer
-	release chan struct{}
-	once    sync.Once
+func waitRunEventChannelFull(t testing.TB, events <-chan pisession.Event) {
+	t.Helper()
+	capacity := cap(events)
+	if capacity == 0 {
+		t.Fatal("pi event channel is unbuffered")
+	}
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		if len(events) == capacity {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for pi event channel saturation: len=%d cap=%d", len(events), capacity)
+		}
+	}
 }
 
-func (w *dialogReleaseWriter) Write(p []byte) (int, error) {
-	n, err := w.Buffer.Write(p)
-	if bytes.Contains(w.Bytes(), []byte("cannot answer dialogs")) {
-		w.once.Do(func() { close(w.release) })
+type observedDiagnosticWriter struct {
+	mu       sync.Mutex
+	buffer   bytes.Buffer
+	match    []byte
+	observed chan struct{}
+	once     sync.Once
+}
+
+func newObservedDiagnosticWriter(match string) *observedDiagnosticWriter {
+	return &observedDiagnosticWriter{match: []byte(match), observed: make(chan struct{})}
+}
+
+func (w *observedDiagnosticWriter) Write(value []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	written, err := w.buffer.Write(value)
+	if bytes.Contains(w.buffer.Bytes(), w.match) {
+		w.once.Do(func() { close(w.observed) })
 	}
-	return n, err
+	return written, err
+}
+
+func (w *observedDiagnosticWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buffer.String()
+}
+
+type blockingDiagnosticWriter struct {
+	mu          sync.Mutex
+	buffer      bytes.Buffer
+	match       []byte
+	blocked     chan struct{}
+	released    chan struct{}
+	blockOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func newBlockingDiagnosticWriter(match string) *blockingDiagnosticWriter {
+	return &blockingDiagnosticWriter{
+		match:    []byte(match),
+		blocked:  make(chan struct{}),
+		released: make(chan struct{}),
+	}
+}
+
+func (w *blockingDiagnosticWriter) Write(value []byte) (int, error) {
+	w.mu.Lock()
+	written, err := w.buffer.Write(value)
+	shouldBlock := bytes.Contains(value, w.match)
+	if shouldBlock {
+		w.blockOnce.Do(func() { close(w.blocked) })
+		<-w.released
+	}
+	w.mu.Unlock()
+	return written, err
+}
+
+func (w *blockingDiagnosticWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buffer.String()
+}
+
+func (w *blockingDiagnosticWriter) release() {
+	w.releaseOnce.Do(func() { close(w.released) })
 }
 
 type runRegistryFile struct {

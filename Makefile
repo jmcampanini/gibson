@@ -178,6 +178,44 @@ cli-proof: ## Build and verify the compiled CLI contract.
 	printf 'CRASH_EXIT=%s\n' "$$crash_rc"; \
 	printf 'CRASH_STDOUT='; tr '\n' ' ' <"$$sandbox/crash.stdout"; printf '\n'; \
 	printf '%s\n' 'CRASH_STDERR_TAIL=preserved' 'CRASH_ORPHANS=0' 'CRASH_REGISTRY=stopped,pid=0'; \
+	FAKEPI_SCENARIO=huge_entry "$$gibson" run quick 'Exercise hostile records' >"$$sandbox/huge.stdout" 2>"$$sandbox/huge.stderr"; \
+	huge_session="$$(python3 -c "import glob,json; matches=[p for p in glob.glob('.gibson/sessions/*.jsonl') if any(json.loads(line).get('customType')=='gibson-hostile-record' for line in open(p))]; assert len(matches)==1; print(matches[0])")"; \
+	python3 -c "import json,sys; lines=open(sys.argv[1],'rb').read().splitlines(); records=[json.loads(line) for line in lines]; custom=next(r for r in records if r.get('customType')=='gibson-hostile-record'); assert len(max(lines,key=len))>1048576; assert custom['data']['marker']=='huge-entry'; assert len(custom['data']['payload'])==1048577 and set(custom['data']['payload'])=={'x'}; assistant=next(r['message'] for r in records if r.get('message',{}).get('role')=='assistant'); expected='Unicode: left'+chr(0x2028)+'middle'+chr(0x2029)+'right.'; assert assistant['content'][0]['text']==expected" "$$huge_session"; \
+	python3 -c "import pathlib,sys; expected='Unicode: left'+chr(0x2028)+'middle'+chr(0x2029)+'right.\\n'; assert pathlib.Path(sys.argv[1]).read_text()==expected" "$$sandbox/huge.stdout"; \
+	grep -Fq '[tool bash] running' "$$sandbox/huge.stderr"; \
+	grep -Fq '[tool bash] done' "$$sandbox/huge.stderr"; \
+	grep -Fq '[notify] hostile record notification' "$$sandbox/huge.stderr"; \
+	grep -Fq '[error] extension hostile-extension.ts: deterministic extension failure' "$$sandbox/huge.stderr"; \
+	if grep -Eq 'tool_execution_update|partialResult|gibson-hostile-record|"payload"' "$$sandbox/huge.stderr"; then echo "huge-entry proof leaked raw protocol data" >&2; exit 1; fi; \
+	huge_stdout_bytes="$$(wc -c <"$$sandbox/huge.stdout" | tr -d ' ')"; \
+	huge_stderr_bytes="$$(wc -c <"$$sandbox/huge.stderr" | tr -d ' ')"; \
+	test "$$huge_stderr_bytes" -le 4096; \
+	python3 -c "import json,os,sys; h=json.loads(open(sys.argv[1]).readline()); d=json.load(open('.gibson/state.json')); s=d['sessions'][h['id']]; assert s['status']=='stopped' and s['pid']==0; assert os.path.isfile('.gibson/logs/'+h['id']+'.stderr.log')" "$$huge_session"; \
+	if pgrep -f "$$PWD/.gibson/sessions" >/dev/null; then echo "huge-entry proof left an orphan" >&2; exit 1; else pgrep_rc=$$?; test "$$pgrep_rc" -eq 1 || exit "$$pgrep_rc"; fi; \
+	test -z "$$(git status --porcelain)"; \
+	printf '%s\n' 'HUGE_EXIT=0'; \
+	printf 'HUGE_SESSION_BYTES=%s\n' "$$(wc -c <"$$huge_session" | tr -d ' ')"; \
+	printf 'HUGE_STDOUT_BYTES=%s\n' "$$huge_stdout_bytes"; \
+	printf 'HUGE_STDERR_BYTES=%s\n' "$$huge_stderr_bytes"; \
+	printf '%s\n' 'HUGE_RECORD_PRESERVED=true' 'HUGE_UNICODE_SEPARATORS_PRESERVED=true' 'HUGE_TERMINAL_OUTPUT_BOUNDED=true' 'HUGE_STDOUT_ASSISTANT_ONLY=true' 'HUGE_STDERR_DIAGNOSTICS=true' 'HUGE_REGISTRY=stopped,pid=0' 'HUGE_GIT_STATUS=clean' 'HUGE_ORPHANS=0'; \
+	FAKEPI_SCENARIO=dialog_confirm python3 -c 'import os, sys; os.setpgid(0, 0); os.execv(sys.argv[1], sys.argv[1:])' "$$gibson" run quick '/dialog' >"$$sandbox/dialog.stdout" 2>"$$sandbox/dialog.stderr" & \
+	dialog_pid=$$!; \
+	for attempt in $$(seq 1 100); do \
+		if grep -Fq 'gibson run cannot answer dialogs' "$$sandbox/dialog.stderr"; then break; fi; \
+		kill -0 "$$dialog_pid" 2>/dev/null || { echo "dialog proof exited before warning" >&2; exit 1; }; \
+		sleep 0.02; \
+	done; \
+	grep -Fq '[warning] pi is waiting for a confirm dialog; gibson run cannot answer dialogs; press Ctrl+C to stop' "$$sandbox/dialog.stderr"; \
+	python3 -c 'import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGINT)' "$$dialog_pid"; \
+	if wait "$$dialog_pid"; then dialog_rc=0; else dialog_rc=$$?; fi; \
+	test "$$dialog_rc" -eq 130; \
+	test ! -s "$$sandbox/dialog.stdout"; \
+	dialog_session="$$(python3 -c "import glob,json; matches=[p for p in glob.glob('.gibson/sessions/*.jsonl') if any(r.get('message',{}).get('role')=='user' and r['message'].get('content')=='/dialog' for r in map(json.loads,open(p)))]; assert len(matches)==1; print(matches[0])")"; \
+	python3 -c "import json,os,sys; records=[json.loads(line) for line in open(sys.argv[1])]; assert any(r.get('message',{}).get('role')=='assistant' and r['message'].get('stopReason')=='aborted' for r in records); h=records[0]; d=json.load(open('.gibson/state.json')); s=d['sessions'][h['id']]; assert s['status']=='stopped' and s['pid']==0; assert os.path.isfile('.gibson/logs/'+h['id']+'.stderr.log')" "$$dialog_session"; \
+	if pgrep -f "$$PWD/.gibson/sessions" >/dev/null; then echo "dialog proof left an orphan" >&2; exit 1; else pgrep_rc=$$?; test "$$pgrep_rc" -eq 1 || exit "$$pgrep_rc"; fi; \
+	test -z "$$(git status --porcelain)"; \
+	printf 'DIALOG_EXIT=%s\n' "$$dialog_rc"; \
+	printf '%s\n' 'DIALOG_WARNING=true' 'DIALOG_STDOUT_ASSISTANT_ONLY=true' 'DIALOG_ABORTED_ENTRY=true' 'DIALOG_REGISTRY=stopped,pid=0' 'DIALOG_GIT_STATUS=clean' 'DIALOG_ORPHANS=0'; \
 	printf '%s\n' 'GIBSON_CLI_PROOF=PASS'
 
 lint: ## Run golangci-lint.
