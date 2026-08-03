@@ -49,7 +49,11 @@ Manager boundary):
   CONV §5. Surface: `store.Open(checkoutPath)` returning a handle with strict
   `List() ([]Record, error)` / `Get(id) (Record, bool, error)`, `Put(record)`,
   context-cancellable allocation-locked `CreateSession`, `SetLive`, and layout/log-path
-  helpers.
+  helpers. Before the HTTP surface adopts these reads, M2 must choose between
+  context-aware `Get`/`List` calls that cancel same-process waits behind `CreateSession`
+  and lock-free atomic-snapshot reads. Cross-process allocation locking polls every 10 ms and
+  has no FIFO fairness guarantee; that remains acceptable for one server plus occasional
+  one-shot CLIs unless M2 proof exposes user-visible contention.
 - `internal/fakepi` + `internal/pitest`: fakepi binary honoring `--session-id` /
   `--session-dir`, writing a real v3 session JSONL, answering `get_state`, `get_entries`
   (including `since` and `success:false` on unknown cursor), `get_session_stats`,

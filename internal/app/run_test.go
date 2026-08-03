@@ -602,6 +602,65 @@ func TestRunFinishesPromptHandledWithoutAgentRun(t *testing.T) {
 	}
 }
 
+func TestRunInterruptFinishesPromptHandledWithoutAgentRun(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	interrupts := make(chan os.Signal, 2)
+	dependencies.interrupts = interrupts
+	stateObserved := make(chan struct{})
+	releaseState := make(chan struct{})
+	abortCalled := make(chan struct{})
+	var releaseStateOnce sync.Once
+	releasePostPromptState := func() { releaseStateOnce.Do(func() { close(releaseState) }) }
+	t.Cleanup(releasePostPromptState)
+	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+		session := newScriptedRunSession(cfg, make(chan pisession.Event))
+		stateCalls := 0
+		session.getState = func() (json.RawMessage, error) {
+			stateCalls++
+			if stateCalls == 2 {
+				close(stateObserved)
+				<-releaseState
+			}
+			return session.state, nil
+		}
+		session.abort = func(context.Context) error {
+			close(abortCalled)
+			return nil
+		}
+		return session, nil
+	}
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "/handled"}, log.New(&bytes.Buffer{}), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
+
+	waitRunSignal(t, stateObserved, "post-prompt idle state")
+	interrupts <- os.Interrupt
+	waitRunSignal(t, abortCalled, "abort command")
+	releasePostPromptState()
+
+	select {
+	case got := <-finished:
+		require.NoError(t, got.err)
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not finish interrupted idle prompt")
+	}
+	registry := readRunRegistry(t, ws.Checkout)
+	require.Len(t, registry.Sessions, 1)
+	for _, record := range registry.Sessions {
+		assert.Equal(t, store.StatusStopped, record.Status)
+		assert.Zero(t, record.PID)
+	}
+}
+
 func TestRunRejectsAmbiguousIdleStateFromUnverifiedPi(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
@@ -982,6 +1041,76 @@ func TestRunFirstInterruptTimesOutWhenPiNeverSettles(t *testing.T) {
 		assert.Equal(t, RunInterrupted, got.outcome)
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not enforce the abort watchdog")
+	}
+	assert.False(t, <-closeForced)
+}
+
+func TestRunAbortWatchdogSurvivesContinuousIdleEventDrain(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	dependencies.abortTimeout = 20 * time.Millisecond
+	interrupts := make(chan os.Signal, 2)
+	dependencies.interrupts = interrupts
+	idleConfirmed := make(chan struct{})
+	releaseIdle := make(chan struct{})
+	var releaseIdleOnce sync.Once
+	releaseIdleState := func() { releaseIdleOnce.Do(func() { close(releaseIdle) }) }
+	t.Cleanup(releaseIdleState)
+	dependencies.onIdleConfirmed = func() {
+		close(idleConfirmed)
+		<-releaseIdle
+	}
+	events := make(chan pisession.Event, 2)
+	floodEvent := runEvent("tool_execution_start", `{"type":"tool_execution_start","toolName":"flood"}`)
+	stderr := newRunEventFeedbackWriter(events, floodEvent, "[tool flood] running")
+	abortCalled := make(chan struct{})
+	releaseAbort := make(chan struct{})
+	closeForced := make(chan bool, 1)
+	var releaseAbortOnce sync.Once
+	releaseAbortCommand := func() { releaseAbortOnce.Do(func() { close(releaseAbort) }) }
+	t.Cleanup(releaseAbortCommand)
+	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+		session := newScriptedRunSession(cfg, events)
+		session.abort = func(context.Context) error {
+			close(abortCalled)
+			<-releaseAbort
+			return nil
+		}
+		session.close = func(ctx context.Context) error {
+			closeForced <- ctx.Err() != nil
+			releaseAbortCommand()
+			return nil
+		}
+		return session, nil
+	}
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{
+			Type: "quick", Message: "wait", Stderr: stderr,
+		}, log.New(stderr), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
+
+	waitRunSignal(t, idleConfirmed, "confirmed idle state")
+	events <- runEvent("agent_start", `{"type":"agent_start"}`)
+	events <- floodEvent
+	interrupts <- os.Interrupt
+	releaseIdleState()
+	waitRunSignal(t, abortCalled, "abort command")
+
+	select {
+	case got := <-finished:
+		require.ErrorContains(t, got.err, "pi did not settle within 20ms after interrupt")
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		interrupts <- os.Interrupt
+		<-finished
+		t.Fatal("continuous pi events starved the abort watchdog")
 	}
 	assert.False(t, <-closeForced)
 }
@@ -1482,6 +1611,23 @@ func newScriptedRunSession(cfg pisession.Config, events chan pisession.Event) *s
 			filepath.Join(cfg.SessionDir, "opaque.jsonl"),
 		)),
 	}
+}
+
+type runEventFeedbackWriter struct {
+	events chan<- pisession.Event
+	event  pisession.Event
+	match  []byte
+}
+
+func newRunEventFeedbackWriter(events chan<- pisession.Event, event pisession.Event, match string) *runEventFeedbackWriter {
+	return &runEventFeedbackWriter{events: events, event: event, match: []byte(match)}
+}
+
+func (w *runEventFeedbackWriter) Write(value []byte) (int, error) {
+	if bytes.Contains(value, w.match) {
+		w.events <- w.event
+	}
+	return len(value), nil
 }
 
 type observedBuffer struct {

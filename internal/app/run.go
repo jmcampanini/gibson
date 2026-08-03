@@ -60,6 +60,7 @@ type runDependencies struct {
 	now              func() time.Time
 	interrupts       <-chan os.Signal
 	abortTimeout     time.Duration
+	onIdleConfirmed  func()
 }
 
 type runStartupControl struct {
@@ -622,6 +623,16 @@ promptWait:
 			default:
 			}
 			select {
+			case abortErr := <-interrupt.results:
+				if done, outcome, finishErr := handleAbortResult(abortErr); done {
+					return outcome, finishErr
+				}
+				continue
+			case <-interrupt.watchdog:
+				return finishInterrupted(false, fmt.Errorf("pi did not settle within %s after interrupt", abortTimeout))
+			default:
+			}
+			select {
 			case event, open := <-events:
 				if !open {
 					return finishExited(errors.Join(interrupt.err, presenter.finishText()))
@@ -711,6 +722,9 @@ promptWait:
 				return finisher.finish(RunCompleted, runErr)
 			}
 			idleConfirmed = !streaming
+			if idleConfirmed && dependencies.onIdleConfirmed != nil {
+				dependencies.onIdleConfirmed()
+			}
 		}
 	}
 }
