@@ -65,7 +65,11 @@ type Session struct {
 }
 
 func Spawn(ctx context.Context, cfg Config) (*Session, error) {
-	if err := ctx.Err(); err != nil {
+	return SpawnWithCleanupContext(ctx, context.Background(), cfg)
+}
+
+func SpawnWithCleanupContext(readinessCtx, cleanupCtx context.Context, cfg Config) (*Session, error) {
+	if err := readinessCtx.Err(); err != nil {
 		return nil, err
 	}
 	if err := validateConfig(cfg); err != nil {
@@ -146,8 +150,8 @@ func Spawn(ctx context.Context, cfg Config) (*Session, error) {
 	go processes.run()
 	go session.reap()
 
-	if _, err := session.GetState(ctx); err != nil {
-		cleanupErr := session.cleanupFailedSpawn()
+	if _, err := session.GetState(readinessCtx); err != nil {
+		cleanupErr := session.cleanupFailedSpawn(cleanupCtx)
 		return nil, errors.Join(fmt.Errorf("probe pi readiness: %w", err), cleanupErr)
 	}
 	return session, nil
@@ -230,7 +234,7 @@ func (s *Session) GetEntries(ctx context.Context, since string) ([]json.RawMessa
 	data, err := s.rpc.command(ctx, "get_entries", fields)
 	if err != nil {
 		var commandErr *commandError
-		if since != "" && errors.As(err, &commandErr) {
+		if since != "" && errors.As(err, &commandErr) && commandErr.command == "get_entries" && commandErr.message == "Entry not found: "+since {
 			return nil, "", fmt.Errorf("%w: %v", ErrInvalidCursor, err)
 		}
 		return nil, "", err
@@ -419,7 +423,7 @@ func (s *Session) reap() {
 }
 
 func signalProcessGroup(pid int, signal syscall.Signal) error {
-	if err := syscall.Kill(-pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := syscall.Kill(-pid, signal); err != nil && !isProcessDisappearance(err) {
 		return err
 	}
 	return nil
@@ -453,6 +457,10 @@ func newOwnedProcessTracker(rootPID int) (*ownedProcessTracker, error) {
 
 func newOwnedProcessTrackerWith(rootPID int, list processListFunc, read processReadFunc) (*ownedProcessTracker, error) {
 	root, exists, err := read(rootPID)
+	if isProcessDisappearance(err) {
+		err = nil
+		exists = false
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -505,12 +513,18 @@ func (t *ownedProcessTracker) capture() error {
 	if !t.rootGone {
 		snapshotRoot, inSnapshot := current[t.root.pid]
 		liveRoot, exists, err := t.read(t.root.pid)
-		if err != nil {
-			identityErr = err
+		if isProcessDisappearance(err) {
+			err = nil
+			exists = false
 		}
-		if err != nil || !inSnapshot || !exists || snapshotRoot.started != t.root.started || liveRoot.started != t.root.started {
+		switch {
+		case err != nil:
+			identityErr = err
+		case !exists || liveRoot.started != t.root.started:
 			t.rootGone = true
-		} else {
+		case inSnapshot && snapshotRoot.started != t.root.started:
+			t.rootGone = true
+		case inSnapshot:
 			discover = true
 		}
 	}
@@ -553,6 +567,9 @@ func (t *ownedProcessTracker) validateDescendant(candidate processRecord, snapsh
 	}
 
 	liveRoot, exists, err := t.read(t.root.pid)
+	if isProcessDisappearance(err) {
+		return processRecord{}, false, nil
+	}
 	if err != nil {
 		return processRecord{}, false, err
 	}
@@ -563,6 +580,9 @@ func (t *ownedProcessTracker) validateDescendant(candidate processRecord, snapsh
 	for index := len(chain) - 1; index >= 0; index-- {
 		expected := chain[index]
 		live, exists, err := t.read(expected.pid)
+		if isProcessDisappearance(err) {
+			return processRecord{}, false, nil
+		}
 		if err != nil {
 			return processRecord{}, false, err
 		}
@@ -579,6 +599,9 @@ func (t *ownedProcessTracker) validateDescendant(candidate processRecord, snapsh
 
 func (t *ownedProcessTracker) signalRootProcessGroup(signal syscall.Signal) error {
 	current, exists, err := t.read(t.root.pid)
+	if isProcessDisappearance(err) {
+		return nil
+	}
 	if err != nil || !exists || current.started != t.root.started {
 		return err
 	}
@@ -655,6 +678,9 @@ func (t *ownedProcessTracker) killTracked() error {
 	for _, pgid := range groupIDs {
 		witness := groups[pgid]
 		currentWitness, exists, err := t.read(witness.pid)
+		if isProcessDisappearance(err) {
+			continue
+		}
 		if err != nil {
 			result = errors.Join(result, err)
 			continue
@@ -692,8 +718,12 @@ func descendantsOf(rootPID int, records []processRecord) []processRecord {
 	return descendants
 }
 
-func (s *Session) cleanupFailedSpawn() error {
-	ctx, cancel := context.WithTimeout(context.Background(), spawnCleanupTimeout)
+func isProcessDisappearance(err error) bool {
+	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.ENOENT)
+}
+
+func (s *Session) cleanupFailedSpawn(cleanupCtx context.Context) error {
+	ctx, cancel := context.WithTimeout(cleanupCtx, spawnCleanupTimeout)
 	defer cancel()
 	return s.Close(ctx)
 }

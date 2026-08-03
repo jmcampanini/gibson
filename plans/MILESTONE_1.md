@@ -195,11 +195,11 @@ the agent is already streaming, otherwise the command errors. `Prompt(ctx, msg, 
 sets the field only when `behavior != ""`; `run` always sends `""` (fresh session, never
 streaming).
 
-Session identity: gibson generates the id (the run path uses `store.CreateSession`;
-`store.NewSessionID` exposes the same collision-aware generator, conventions §5 format
-`s-<YYYYMMDD>-<6 of [a-z0-9] via crypto/rand>`, matching pi's id regex SPEC §5.1.2,
-regenerated on collision against registry + `sessions/` headers) and passes it via
-`--session-id`; gibson session id **is** the pi session id. The session **file name**
+Session identity: gibson generates the id through `store.CreateSession` using conventions
+§5 format `s-<YYYYMMDD>-<6 of [a-z0-9] via crypto/rand>`, matching pi's id regex
+SPEC §5.1.2 and regenerating on collision against registry + `sessions/` headers, then
+passes it via `--session-id`; gibson session id **is** the pi session id. Standalone ID
+allocation is not exposed because an unreserved result is unsafe. The session **file name**
 under `sessions/` is treated as opaque — pi's docs pin `<timestamp>_<uuid>.jsonl` only
 for the default dir — so gibson identifies a session's file by reading each file's
 header line (`{"type":"session","version":3,"id":...}`) and matching `id`, never by
@@ -224,8 +224,10 @@ PID plus precise OS birth-token ownership identities after reparenting. Darwin u
 kernel start timeval; Linux uses `/proc` start ticks and pidfds for individual signals
 when supported. Because Linux enumeration is per PID, each new candidate's complete
 PID/birth-token/PPID chain is re-read root-to-leaf before adoption, rejecting mixed-time
-snapshots. Discovery stops permanently when the original pi birth token disappears, so
-a recycled root PID cannot contribute descendants. PGID is mutable routing data: it
+snapshots. Discovery stops permanently only when the original pi birth token is confirmed
+missing or changed; transient identity-read errors are reported and retried. Per-PID
+`ESRCH`/`ENOENT` churn is treated as disappearance without aborting the remaining scan,
+so a recycled root PID cannot contribute descendants. PGID is mutable routing data: it
 is refreshed while PID/birth identity still matches and is not required for an individual
 kill. Every signal revalidates identity; whole-group signaling additionally requires a
 still-owned matching group leader or member of pi's extant original group. The reaper
@@ -278,7 +280,9 @@ Final M1 writes use process-local serialization plus a per-checkout cross-proces
 Every full-file read-modify-write mutation reloads the latest registry while holding the
 lock and completes its write-temp-then-`os.Rename` replacement before unlocking. This
 prevents concurrent one-shot commands, or a command overlapping the later server, from
-losing records while preserving atomic snapshots for readers. Chunk 4 establishes the
+losing records while preserving atomic snapshots for readers. Public reads return strict
+load and validation errors; they never present a corrupt registry as empty or a missing
+session. Chunk 4 establishes the
 process-local and atomic-replacement shape; Chunk 6 completes the cross-process protocol.
 Fresh-session creation holds that same per-checkout lock while it reloads the registry,
 scans session-file headers for collisions, allocates an ID, starts pi through readiness,
@@ -328,16 +332,23 @@ Output contract (pipeable stdout, human stderr):
   `assistantMessageEvent.type == "text_delta"`, written incrementally
   (`assistantMessageEvent.delta`); a trailing `\n` is added at the end if the text
   didn't end with one. Thinking deltas are not printed.
-- **stderr**: session id + session file + log path (one line at start, one at exit);
+- **stderr**: session id + session file + log path (one line at start, one at exit); if
+  startup fails before pi reports its session file, the exit line omits the unknown
+  `file` field rather than printing an empty value;
   `tool_execution_start/end` as `[tool <name>] running` / `[tool <name>] done|error`
   lines; `extension_ui_request` with `method` `notify` as `[notify] <message>`; a
   blocking dialog method (`select|confirm|input|editor`) prints a loud warning —
   `gibson run` cannot answer dialogs (M5 owns them); pi auto-resolves only if the
   request carries a `timeout` (SPEC §6.4.3), otherwise Ctrl+C is the way out.
 
-Interrupts: first SIGINT → send `abort`, keep consuming until `agent_settled` (the
-aborted message with `stopReason:"aborted"` lands in the session file), then normal
-shutdown, exit 130; second SIGINT → immediate `Close` (SIGTERM→5s→SIGKILL), exit 130.
+Interrupts: a pre-prompt first SIGINT cancels version checking, allocation-lock waiting,
+or readiness and prevents prompt submission; a second SIGINT forces stalled startup
+cleanup. After prompt submission, the first SIGINT sends `abort` and allows up to 10
+seconds for the aborted message with `stopReason:"aborted"` to become durable through
+`agent_settled`. That durable settlement is sufficient even if pi omits the abort command
+response. If settlement does not arrive, Gibson begins normal shutdown and reports the
+timeout while retaining exit 130. A second SIGINT at any point forces immediate `Close`
+(SIGTERM→5s→SIGKILL), exit 130.
 
 Exit codes (M1-local CLI design; no later milestone consumes them): `0` — agent settled
 without error; `1` — any gibson/pi error (bad config, unknown type/checkout, version
@@ -487,6 +498,9 @@ here so later plans may rely on them):
   `charm.land/log/v2`.
 - `pisession.Spawn(ctx, Config) (*Session, error)` — spawns, starts pumps, runs the
   `get_state` readiness probe.
+- `pisession.SpawnWithCleanupContext(readinessCtx, cleanupCtx, Config) (*Session, error)` —
+  preserves the same ready-on-return contract while allowing startup orchestration to
+  cancel readiness separately from forced failed-spawn cleanup.
 - `pisession.Session` methods:
   - `Prompt(ctx, message, behavior string) error` (`behavior` ∈ `""|"steer"|"followUp"`,
     maps to `streamingBehavior`)
@@ -496,7 +510,8 @@ here so later plans may rely on them):
   - `Abort(ctx) error`
   - `GetState(ctx) (json.RawMessage, error)` (response `data` verbatim)
   - `GetEntries(ctx, since string) (entries []json.RawMessage, leafID string, err error)`
-    (`ErrInvalidCursor` on pi `success:false` for a `since` miss — M2's SSE `reset` hook)
+    (`ErrInvalidCursor` only on pi's exact `Entry not found: <since>` failure — M2's SSE
+    `reset` hook; unrelated command failures remain intact)
   - `GetSessionStats(ctx) (json.RawMessage, error)`
   - `SetSessionName(ctx, name string) error`
   - `RespondUI(id string, res UIResolution) error`, with
@@ -514,13 +529,14 @@ here so later plans may rely on them):
   `pisession.CheckPiVersion(ctx, bin) (VersionResult, error)` reused by `run`, with
   minimum/verified/newer behavior from §2.
 - `store.Store` (`store.Open(checkoutPath)`): `EnsureLayout()`, `SessionsDir()`,
-  `StderrLogPath(id)`, `NewSessionID() (string, error)`,
-  `CreateSession(func(id string) (SessionCreation, error)) (string, error)` (holds
-  allocation through callback + live write and invokes `SessionCreation.Rollback` under
-  lock on post-spawn failure), `Put(Record)` (create only),
-  `SetLive(id string, pid int)`, `StopIfLivePID(id string, pid int) (bool, error)`,
-  `SetStatus(id string, s Status)`, `Touch(id string, t time.Time)`,
-  `Get(id) (Record, bool)`, `List() []Record`,
+  `StderrLogPath(id)`,
+  `CreateSession(ctx context.Context, func(id string) (SessionCreation, error)) (string, error)`
+  (interruptibly acquires the allocation lock, then holds it through callback + live write
+  and invokes `SessionCreation.Rollback` under lock on post-spawn failure), `Put(Record)`
+  (create only), `SetLive(id string, pid int)`,
+  `StopIfLivePID(id string, pid int) (bool, error)`, `SetStatus(id string, s Status)`,
+  `Touch(id string, t time.Time)`, `Get(id) (Record, bool, error)`,
+  `List() ([]Record, error)`,
   `FindSessionFile(id) (string, error)`;
   `store.SessionCreation` = `{Record store.Record; Rollback func() error}`;
   `store.Record`, `store.Status` (`StatusLive/StatusStopped/StatusClosed`, persisted as
@@ -579,8 +595,9 @@ or explicitly assigned to its owning later milestone with rationale:
 - Linux process churn: treat `ESRCH` as process disappearance, keep one vanishing unrelated
   `/proc` entry from aborting the whole cleanup scan, and reserve permanent `rootGone` for
   a confirmed missing or changed root identity rather than a transient read error.
-- Wedged abort: decide and prove a bounded single-interrupt policy without weakening the
-  durable-abort path or second-interrupt force behavior.
+- Wedged abort: allow 10 seconds for durable `agent_settled`, accept that durable result
+  without requiring a separate abort response, then close normally on timeout while
+  preserving the second-interrupt force path.
 - Cursor semantics: map only pi's missing-entry response to `ErrInvalidCursor`, leaving
   unrelated command failures intact before `GetEntries` gains broader consumers.
 - Interrupted diagnostics: retain useful racing errors with the exit-130 outcome and omit
@@ -672,41 +689,41 @@ All steps passing is the M1 done signal.
 
 ## 9. Success criteria checklist
 
-- [ ] SPEC §3.2.4 — `model`/`thinking` map to pi flags; `extra_args` appended verbatim,
+- [x] SPEC §3.2.4 — `model`/`thinking` map to pi flags; `extra_args` appended verbatim,
       last, never parsed (argv table test + fakepi tripwire).
-- [ ] SPEC §4.1 — `.gibson/{sessions,state.json,logs/<id>.stderr.log}` created per
+- [x] SPEC §4.1 — `.gibson/{sessions,state.json,logs/<id>.stderr.log}` created per
       layout; pi JSONL is ground truth; registry holds only gibson metadata with
       statuses `live|stopped|closed` (conventions §5 schema exactly).
-- [ ] SPEC §4.1.3 — `--checkout` sessions are self-contained in that worktree (proof 7).
-- [ ] Repository hygiene — proof workspaces commit `.gitignore` coverage for `.gibson/`;
+- [x] SPEC §4.1.3 — `--checkout` sessions are self-contained in that worktree (proof 7).
+- [x] Repository hygiene — proof workspaces commit `.gitignore` coverage for `.gibson/`;
       `git status --porcelain` stays empty after a run.
-- [ ] SPEC §5.1.1 — exact argv shape and cwd = target checkout (proof 4/5: one process,
+- [x] SPEC §5.1.1 — exact argv shape and cwd = target checkout (proof 4/5: one process,
       session file in that checkout).
-- [ ] SPEC §5.1.2 — gibson-assigned id matches pi's id rules; id format per
+- [x] SPEC §5.1.2 — gibson-assigned id matches pi's id rules; id format per
       conventions §5.
-- [ ] SPEC §5.1.3 — single writer: fresh id per run, one process per id, no re-spawn
+- [x] SPEC §5.1.3 — single writer: fresh id per run, one process per id, no re-spawn
       paths in M1.
-- [ ] SPEC §5.1.4 — stderr captured to `logs/<id>.stderr.log` (proof 5; crash test
+- [x] SPEC §5.1.4 — stderr captured to `logs/<id>.stderr.log` (proof 5; crash test
       shows content).
-- [ ] SPEC §5.2.2 (M1 slice) — SIGTERM-first shutdown; pi exits 143 (gated test).
-- [ ] SPEC §5.4.1 — version checked before any spawn; <0.82.0 fails, 0.82.x is verified,
+- [x] SPEC §5.2.2 (M1 slice) — SIGTERM-first shutdown; pi exits 143 (gated test).
+- [x] SPEC §5.4.1 — version checked before any spawn; <0.82.0 fails, 0.82.x is verified,
       and later minor or major versions proceed with a Charm Log warning naming found/verified versions.
-- [ ] SPEC §6.1.1–6.1.3 — LF-only framing with `\r` strip; U+2028/U+2029-safe; >1MB
+- [x] SPEC §6.1.1–6.1.3 — LF-only framing with `\r` strip; U+2028/U+2029-safe; >1MB
       lines; blocking writes/reads as backpressure (unit tables + `huge_entry`).
-- [ ] SPEC §6.2 — `prompt` (accepted-not-completed semantics, `streamingBehavior`
+- [x] SPEC §6.2 — `prompt` (accepted-not-completed semantics, `streamingBehavior`
       plumbed), `abort` (aborted message `stopReason:"aborted"`), `get_state`,
       `get_entries` (`since` cursor; invalid → `ErrInvalidCursor`),
       `get_session_stats`, `set_session_name` all implemented per rpc.md.
-- [ ] Conventions §6 — spawn sequence (spawn → `get_state` probe → prompt), command ids
+- [x] Conventions §6 — spawn sequence (spawn → `get_state` probe → prompt), command ids
       `c-<n>`, bounded writes, one 30s ordinary-command budget, unbounded prompt-response
       waiting, single-goroutine writes, `ReadBytes` pump, and shutdown
       SIGTERM→5s→SIGKILL.
-- [ ] Conventions §7 — `pisession.Session` exports exactly the pinned method set (plus
+- [x] Conventions §7 — `pisession.Session` exports exactly the pinned method set (plus
       the M1-added names in §6 above).
-- [ ] Conventions §9 — fakepi carries the default suite (no LLM/network in
+- [x] Conventions §9 — fakepi carries the default suite (no LLM/network in
       `go test ./...`); real-pi tests gated by `GIBSON_TEST_REAL_PI=1`; scenarios
       include `dialog_confirm` for M5 reuse.
-- [ ] MILESTONES M1 proof — `gibson run` streams output, settles, leaves a session
+- [x] MILESTONES M1 proof — `gibson run` streams output, settles, leaves a session
       JSONL + registry entry, and aborts cleanly mid-stream (proof steps 4–6 pass,
       agent-run).
 

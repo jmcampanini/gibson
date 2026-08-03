@@ -456,7 +456,7 @@ func (p *fakePi) getEntries(id json.RawMessage, fields map[string]json.RawMessag
 			}
 		}
 		if index == -1 {
-			return p.writeResponse(p.failure(id, "get_entries", fmt.Sprintf("entry not found: %s", since)))
+			return p.writeResponse(p.failure(id, "get_entries", fmt.Sprintf("Entry not found: %s", since)))
 		}
 		entries = entries[index+1:]
 	}

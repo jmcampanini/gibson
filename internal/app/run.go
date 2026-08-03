@@ -22,6 +22,7 @@ import (
 
 const (
 	runCleanupTimeout = 5 * time.Second
+	runAbortTimeout   = 10 * time.Second
 	crashTailSize     = 8 << 10
 )
 
@@ -51,12 +52,89 @@ type runSession interface {
 }
 
 type runDependencies struct {
-	getwd          func() (string, error)
-	resolvePiBin   func(string) (string, error)
-	checkPiVersion func(context.Context, string) (pisession.VersionResult, error)
-	spawn          func(context.Context, pisession.Config) (runSession, error)
-	now            func() time.Time
+	getwd            func() (string, error)
+	resolvePiBin     func(string) (string, error)
+	checkPiVersion   func(context.Context, string) (pisession.VersionResult, error)
+	spawn            func(context.Context, pisession.Config) (runSession, error)
+	spawnWithCleanup func(context.Context, context.Context, pisession.Config) (runSession, error)
+	now              func() time.Time
+	interrupts       <-chan os.Signal
+	abortTimeout     time.Duration
+}
+
+type runStartupControl struct {
+	ctx            context.Context
+	cancel         context.CancelFunc
+	cleanupCtx     context.Context
+	forceCleanup   context.CancelFunc
 	interrupts     <-chan os.Signal
+	interruptCount int
+}
+
+func newRunStartupControl(ctx context.Context, interrupts <-chan os.Signal) *runStartupControl {
+	startupCtx, cancel := context.WithCancel(ctx)
+	cleanupCtx, forceCleanup := context.WithCancel(context.Background())
+	return &runStartupControl{
+		ctx:          startupCtx,
+		cancel:       cancel,
+		cleanupCtx:   cleanupCtx,
+		forceCleanup: forceCleanup,
+		interrupts:   interrupts,
+	}
+}
+
+func (c *runStartupControl) close() {
+	c.cancel()
+	c.forceCleanup()
+}
+
+func (c *runStartupControl) interrupted() bool {
+	return c.interruptCount > 0
+}
+
+func (c *runStartupControl) checkInterrupted() bool {
+	c.drainInterrupts()
+	return c.interrupted()
+}
+
+func (c *runStartupControl) receiveInterrupt() {
+	c.interruptCount++
+	if c.interruptCount == 1 {
+		c.cancel()
+		return
+	}
+	c.forceCleanup()
+}
+
+func (c *runStartupControl) drainInterrupts() {
+	for {
+		select {
+		case <-c.interrupts:
+			c.receiveInterrupt()
+		default:
+			return
+		}
+	}
+}
+
+type runAsyncResult[T any] struct {
+	value T
+	err   error
+}
+
+func waitRunStartup[T any](control *runStartupControl, results <-chan runAsyncResult[T], abandonOnSecondInterrupt bool) (runAsyncResult[T], bool) {
+	for {
+		select {
+		case result := <-results:
+			control.drainInterrupts()
+			return result, false
+		case <-control.interrupts:
+			control.receiveInterrupt()
+			if abandonOnSecondInterrupt && control.interruptCount > 1 {
+				return runAsyncResult[T]{}, true
+			}
+		}
+	}
 }
 
 func Run(ctx context.Context, options RunOptions, logger *log.Logger) (RunOutcome, error) {
@@ -70,8 +148,12 @@ func Run(ctx context.Context, options RunOptions, logger *log.Logger) (RunOutcom
 		spawn: func(ctx context.Context, cfg pisession.Config) (runSession, error) {
 			return pisession.Spawn(ctx, cfg)
 		},
-		now:        time.Now,
-		interrupts: interrupts,
+		spawnWithCleanup: func(readinessCtx, cleanupCtx context.Context, cfg pisession.Config) (runSession, error) {
+			return pisession.SpawnWithCleanupContext(readinessCtx, cleanupCtx, cfg)
+		},
+		now:          time.Now,
+		interrupts:   interrupts,
+		abortTimeout: runAbortTimeout,
 	})
 }
 
@@ -88,9 +170,21 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		logger = log.New(io.Discard)
 	}
 
+	startup := newRunStartupControl(ctx, dependencies.interrupts)
+	defer startup.close()
+	if startup.checkInterrupted() {
+		return RunInterrupted, nil
+	}
+	if err := startup.ctx.Err(); err != nil {
+		return classifyRunError(ctx, err)
+	}
+
 	workingDirectory, err := dependencies.getwd()
 	if err != nil {
 		return classifyRunError(ctx, fmt.Errorf("determine working directory: %w", err))
+	}
+	if startup.checkInterrupted() {
+		return RunInterrupted, nil
 	}
 	ws, err := workspace.Locate(workingDirectory)
 	if err != nil {
@@ -111,15 +205,39 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 			return classifyRunError(ctx, err)
 		}
 	}
+	if startup.checkInterrupted() {
+		return RunInterrupted, nil
+	}
 
 	piBin, err := dependencies.resolvePiBin(cfg.Server.PiBin)
 	if err != nil {
 		return classifyRunError(ctx, err)
 	}
-	piVersion, err := dependencies.checkPiVersion(ctx, piBin)
-	if err != nil {
-		return classifyRunError(ctx, err)
+	if startup.checkInterrupted() {
+		return RunInterrupted, nil
 	}
+	versionResults := make(chan runAsyncResult[pisession.VersionResult], 1)
+	go func() {
+		version, versionErr := dependencies.checkPiVersion(startup.ctx, piBin)
+		versionResults <- runAsyncResult[pisession.VersionResult]{value: version, err: versionErr}
+	}()
+	versionResult, abandoned := waitRunStartup(startup, versionResults, true)
+	if abandoned {
+		return RunInterrupted, nil
+	}
+	if versionResult.err != nil {
+		if startup.interrupted() {
+			if errors.Is(versionResult.err, startup.ctx.Err()) {
+				return RunInterrupted, withoutExpectedErrors(versionResult.err, startup.ctx.Err(), pisession.ErrPiVersionExecution)
+			}
+			return RunInterrupted, versionResult.err
+		}
+		return classifyRunError(ctx, versionResult.err)
+	}
+	if startup.interrupted() {
+		return RunInterrupted, nil
+	}
+	piVersion := versionResult.value
 	if !piVersion.Verified {
 		logger.Warn(
 			"pi version has not been verified with Gibson",
@@ -130,55 +248,78 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 	}
 
 	storage := store.Open(checkout)
+	if startup.checkInterrupted() {
+		return RunInterrupted, nil
+	}
 	if err := storage.EnsureLayout(); err != nil {
 		return RunCompleted, err
 	}
+	if startup.checkInterrupted() {
+		return RunInterrupted, nil
+	}
 	var session runSession
 	var logPath string
-	sessionID, err := storage.CreateSession(func(id string) (store.SessionCreation, error) {
-		logPath = storage.StderrLogPath(id)
-		spawned, spawnErr := dependencies.spawn(ctx, pisession.Config{
-			PiBin:      piBin,
-			SessionID:  id,
-			SessionDir: storage.SessionsDir(),
-			Cwd:        checkout,
-			Model:      sessionType.Model,
-			Thinking:   sessionType.Thinking,
-			ExtraArgs:  sessionType.ExtraArgs,
-			StderrPath: logPath,
-			Logger:     logger,
+	creationResults := make(chan runAsyncResult[string], 1)
+	go func() {
+		sessionID, createErr := storage.CreateSession(startup.ctx, func(id string) (store.SessionCreation, error) {
+			logPath = storage.StderrLogPath(id)
+			spawnConfig := pisession.Config{
+				PiBin:      piBin,
+				SessionID:  id,
+				SessionDir: storage.SessionsDir(),
+				Cwd:        checkout,
+				Model:      sessionType.Model,
+				Thinking:   sessionType.Thinking,
+				ExtraArgs:  sessionType.ExtraArgs,
+				StderrPath: logPath,
+				Logger:     logger,
+			}
+			var spawned runSession
+			var spawnErr error
+			if dependencies.spawnWithCleanup != nil {
+				spawned, spawnErr = dependencies.spawnWithCleanup(startup.ctx, startup.cleanupCtx, spawnConfig)
+			} else {
+				spawned, spawnErr = dependencies.spawn(startup.ctx, spawnConfig)
+			}
+			if spawnErr != nil {
+				return store.SessionCreation{}, spawnErr
+			}
+			session = spawned
+			startedAt := dependencies.now().UTC().Format(time.RFC3339)
+			return store.SessionCreation{
+				Record: store.Record{
+					ID:             id,
+					Type:           options.Type,
+					Status:         store.StatusLive,
+					CreatedAt:      startedAt,
+					LastActivityAt: startedAt,
+					PID:            session.PID(),
+				},
+				Rollback: func() error {
+					rollbackErr := closeRunSession(spawned, startup.cleanupCtx.Err() != nil, nil)
+					session = nil
+					return rollbackErr
+				},
+			}, nil
 		})
-		if spawnErr != nil {
-			return store.SessionCreation{}, spawnErr
-		}
-		session = spawned
-		startedAt := dependencies.now().UTC().Format(time.RFC3339)
-		return store.SessionCreation{
-			Record: store.Record{
-				ID:             id,
-				Type:           options.Type,
-				Status:         store.StatusLive,
-				CreatedAt:      startedAt,
-				LastActivityAt: startedAt,
-				PID:            session.PID(),
-			},
-			Rollback: func() error {
-				rollbackErr := closeRunSession(spawned, false, nil)
-				session = nil
-				return rollbackErr
-			},
-		}, nil
-	})
-	if err != nil {
+		creationResults <- runAsyncResult[string]{value: sessionID, err: createErr}
+	}()
+	creationResult, _ := waitRunStartup(startup, creationResults, false)
+	sessionID := creationResult.value
+	if creationResult.err != nil {
 		var closeErr error
 		var registryErr error
 		if session != nil {
-			closeErr = closeRunSession(session, false, nil)
+			closeErr = closeRunSession(session, startup.cleanupCtx.Err() != nil, nil)
 			if _, stopErr := storage.StopIfLivePID(sessionID, session.PID()); stopErr != nil {
 				registryErr = fmt.Errorf("record stopped session after creation failure: %w", stopErr)
 			}
 		}
-		return classifyRunError(ctx, errors.Join(fmt.Errorf("create live session: %w", err), closeErr, registryErr))
+		runErr := errors.Join(fmt.Errorf("create live session: %w", creationResult.err), closeErr, registryErr)
+		if startup.interrupted() {
+			return RunInterrupted, withoutContextError(runErr, startup.ctx.Err())
+		}
+		return classifyRunError(ctx, runErr)
 	}
 	finisher := runFinisher{
 		session:   session,
@@ -188,12 +329,31 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		logPath:   logPath,
 		logger:    logger,
 	}
+	finishStartupInterrupt := func(runErr error) (RunOutcome, error) {
+		if startup.interruptCount > 1 {
+			return finisher.finishForced(RunInterrupted, runErr)
+		}
+		return finisher.finishInterrupt(RunInterrupted, runErr, dependencies.interrupts)
+	}
+	if startup.interrupted() {
+		return finishStartupInterrupt(nil)
+	}
 
-	stateRaw, err := session.GetState(ctx)
-	if err != nil {
-		outcome, runErr := classifyRunError(ctx, fmt.Errorf("read pi session state: %w", err))
+	initialStateResults := make(chan runAsyncResult[json.RawMessage], 1)
+	go func() {
+		stateRaw, stateErr := session.GetState(startup.ctx)
+		initialStateResults <- runAsyncResult[json.RawMessage]{value: stateRaw, err: stateErr}
+	}()
+	initialStateResult, _ := waitRunStartup(startup, initialStateResults, false)
+	if startup.interrupted() {
+		runErr := withoutContextError(initialStateResult.err, startup.ctx.Err())
+		return finishStartupInterrupt(runErr)
+	}
+	if initialStateResult.err != nil {
+		outcome, runErr := classifyRunError(ctx, fmt.Errorf("read pi session state: %w", initialStateResult.err))
 		return finisher.finish(outcome, runErr)
 	}
+	stateRaw := initialStateResult.value
 	var state struct {
 		SessionID   string `json:"sessionId"`
 		SessionFile string `json:"sessionFile"`
@@ -231,18 +391,25 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 
 	interrupt := runInterruptState{}
 	interrupts := dependencies.interrupts
+	abortTimeout := dependencies.abortTimeout
+	if abortTimeout <= 0 {
+		abortTimeout = runAbortTimeout
+	}
 	finishInterrupted := func(force bool, runErr error) (RunOutcome, error) {
+		interrupt.stopWatchdog()
 		runErr = errors.Join(runErr, interrupt.err, presenter.finalAssistantErr, presenter.finishText())
 		if force {
 			return finisher.finishForced(RunInterrupted, runErr)
 		}
 		return finisher.finishInterrupt(RunInterrupted, runErr, dependencies.interrupts)
 	}
-	finishCancelled := func() (RunOutcome, error) {
-		runErr := errors.Join(presenter.finalAssistantErr, presenter.finishText())
+	finishCancelled := func(racingErr error) (RunOutcome, error) {
+		interrupt.stopWatchdog()
+		runErr := errors.Join(withoutContextError(racingErr, ctx.Err()), presenter.finalAssistantErr, presenter.finishText())
 		return finisher.finish(RunInterrupted, runErr)
 	}
 	finishExited := func(runErr error) (RunOutcome, error) {
+		interrupt.stopWatchdog()
 		interrupted := interrupt.started
 		if !interrupted {
 			select {
@@ -259,11 +426,10 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 			outcome, err := finishInterrupted(true, nil)
 			return true, outcome, err
 		}
-		interrupt.start(session, &presenter)
+		interrupt.start(session, &presenter, abortTimeout)
 		return false, RunCompleted, nil
 	}
 	handleAbortResult := func(err error) (bool, RunOutcome, error) {
-		interrupt.complete = true
 		interrupt.results = nil
 		if err != nil {
 			interrupt.err = fmt.Errorf("abort pi: %w", err)
@@ -302,9 +468,6 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 	}
 	finishSettled := func() (bool, RunOutcome, error) {
 		if interrupt.started {
-			if !interrupt.complete {
-				return false, RunCompleted, nil
-			}
 			outcome, err := finishInterrupted(false, nil)
 			return true, outcome, err
 		}
@@ -312,13 +475,20 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 			return errors.Join(presenter.finalAssistantErr, presenter.finishText())
 		})
 	}
+	if startup.checkInterrupted() {
+		presenter.suppressText = true
+		return finishStartupInterrupt(presenter.finishText())
+	}
+
 	type promptStartResult struct {
 		acceptance <-chan error
 		err        error
 	}
+	promptCtx, cancelPrompt := context.WithCancel(ctx)
+	defer cancelPrompt()
 	promptStarts := make(chan promptStartResult, 1)
 	go func() {
-		acceptance, err := session.StartPrompt(ctx, options.Message, "")
+		acceptance, err := session.StartPrompt(promptCtx, options.Message, "")
 		promptStarts <- promptStartResult{acceptance: acceptance, err: err}
 	}()
 	var promptResults <-chan error
@@ -326,13 +496,22 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 	for promptResults == nil {
 		select {
 		case <-ctx.Done():
-			return finishCancelled()
+			var racingErr error
+			select {
+			case result := <-promptStarts:
+				if result.err != nil {
+					racingErr = fmt.Errorf("prompt pi: %w", result.err)
+				}
+			default:
+			}
+			return finishCancelled(racingErr)
 		case <-interrupts:
 			if interruptBeforePrompt {
 				return finisher.finishForced(RunInterrupted, presenter.finishText())
 			}
 			interruptBeforePrompt = true
 			presenter.suppressText = true
+			cancelPrompt()
 		case result := <-promptStarts:
 			if result.err != nil {
 				if !interruptBeforePrompt {
@@ -345,7 +524,7 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 				}
 				promptErr := fmt.Errorf("prompt pi: %w", result.err)
 				if interruptBeforePrompt {
-					runErr := errors.Join(promptErr, presenter.finishText())
+					runErr := errors.Join(withoutContextError(promptErr, promptCtx.Err()), presenter.finishText())
 					return finisher.finishInterrupt(RunInterrupted, runErr, interrupts)
 				}
 				outcome, classifiedErr := classifyRunError(ctx, promptErr)
@@ -353,7 +532,7 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 			}
 			promptResults = result.acceptance
 			if interruptBeforePrompt {
-				interrupt.start(session, &presenter)
+				interrupt.start(session, &presenter, abortTimeout)
 			}
 		}
 	}
@@ -363,7 +542,15 @@ promptWait:
 	for {
 		select {
 		case <-ctx.Done():
-			return finishCancelled()
+			var racingErr error
+			select {
+			case promptErr := <-promptResults:
+				if promptErr != nil {
+					racingErr = fmt.Errorf("prompt pi: %w", promptErr)
+				}
+			default:
+			}
+			return finishCancelled(racingErr)
 		case <-interrupts:
 			if done, outcome, interruptErr := handleInterrupt(); done {
 				return outcome, interruptErr
@@ -372,6 +559,8 @@ promptWait:
 			if done, outcome, finishErr := handleAbortResult(abortErr); done {
 				return outcome, finishErr
 			}
+		case <-interrupt.watchdog:
+			return finishInterrupted(false, fmt.Errorf("pi did not settle within %s after interrupt", abortTimeout))
 		case event, open := <-events:
 			if !open {
 				return finishExited(errors.Join(interrupt.err, presenter.finishText()))
@@ -381,12 +570,17 @@ promptWait:
 				return finishEventError(eventErr)
 			}
 			settledBeforeAcceptance = settledBeforeAcceptance || settled
-			if interrupt.started && interrupt.complete && interrupt.settled {
+			if interrupt.started && interrupt.settled {
 				return finishInterrupted(false, nil)
 			}
 		case promptErr := <-promptResults:
 			if promptErr != nil {
 				if interrupt.started {
+					promptErr = withoutContextError(promptErr, promptCtx.Err())
+					if promptErr == nil {
+						promptResults = nil
+						continue
+					}
 					return finishInterrupted(false, fmt.Errorf("prompt pi: %w", promptErr))
 				}
 				outcome, runErr := classifyRunError(ctx, fmt.Errorf("prompt pi: %w", promptErr))
@@ -409,15 +603,11 @@ promptWait:
 		}
 	}
 
-	type stateResult struct {
-		raw json.RawMessage
-		err error
-	}
 	// Verified pi marks a normal run streaming before it can process this follow-up command. Ordered stdout ensures events emitted before the state response are queued for the drain below.
-	stateResults := make(chan stateResult, 1)
+	stateResults := make(chan runAsyncResult[json.RawMessage], 1)
 	go func() {
 		raw, err := session.GetState(ctx)
-		stateResults <- stateResult{raw: raw, err: err}
+		stateResults <- runAsyncResult[json.RawMessage]{value: raw, err: err}
 	}()
 
 	idleConfirmed := false
@@ -448,43 +638,37 @@ promptWait:
 				continue
 			default:
 				if !interrupt.agentStarted {
+					var idleErr error
 					if !piVersion.Verified {
-						runErr := fmt.Errorf("cannot safely determine prompt completion with unverified pi %s: pi reported idle before agent_start", piVersion.Found)
-						if interrupt.started {
-							return finishInterrupted(false, runErr)
-						}
-						select {
-						case <-interrupts:
-							if done, outcome, interruptErr := handleInterrupt(); done {
-								return outcome, interruptErr
-							}
-							continue
-						default:
-							return finisher.finish(RunCompleted, runErr)
-						}
+						idleErr = fmt.Errorf("cannot safely determine prompt completion with unverified pi %s: pi reported idle before agent_start", piVersion.Found)
 					}
 					if interrupt.started {
-						if interrupt.complete {
-							return finishInterrupted(false, nil)
-						}
-					} else {
-						select {
-						case <-interrupts:
-							if done, outcome, interruptErr := handleInterrupt(); done {
-								return outcome, interruptErr
-							}
-							continue
-						default:
-							return finisher.finish(RunCompleted, presenter.finishText())
-						}
+						return finishInterrupted(false, idleErr)
 					}
+					if done, outcome, finishErr := finishNormalWithInterruptPriority(func() error {
+						if idleErr != nil {
+							return idleErr
+						}
+						return presenter.finishText()
+					}); done {
+						return outcome, finishErr
+					}
+					continue
 				}
 			}
 		}
 
 		select {
 		case <-ctx.Done():
-			return finishCancelled()
+			var racingErr error
+			select {
+			case result := <-stateResults:
+				if result.err != nil {
+					racingErr = fmt.Errorf("check pi state after prompt acceptance: %w", result.err)
+				}
+			default:
+			}
+			return finishCancelled(racingErr)
 		case <-interrupts:
 			if done, outcome, interruptErr := handleInterrupt(); done {
 				return outcome, interruptErr
@@ -493,6 +677,8 @@ promptWait:
 			if done, outcome, finishErr := handleAbortResult(abortErr); done {
 				return outcome, finishErr
 			}
+		case <-interrupt.watchdog:
+			return finishInterrupted(false, fmt.Errorf("pi did not settle within %s after interrupt", abortTimeout))
 		case event, open := <-events:
 			if !open {
 				return finishExited(errors.Join(interrupt.err, presenter.finishText()))
@@ -516,7 +702,7 @@ promptWait:
 				runErr = errors.Join(runErr, presenter.finishText())
 				return finisher.finish(outcome, runErr)
 			}
-			streaming, stateErr := runSessionStreaming(result.raw)
+			streaming, stateErr := runSessionStreaming(result.value)
 			if stateErr != nil {
 				runErr := errors.Join(stateErr, presenter.finishText())
 				if interrupt.started {
@@ -531,21 +717,31 @@ promptWait:
 
 type runInterruptState struct {
 	started      bool
-	complete     bool
 	settled      bool
 	agentStarted bool
 	results      <-chan error
+	watchdog     <-chan time.Time
+	timer        *time.Timer
 	err          error
 }
 
-func (s *runInterruptState) start(session runSession, presenter *runPresenter) {
+func (s *runInterruptState) start(session runSession, presenter *runPresenter, timeout time.Duration) {
 	s.started = true
 	presenter.suppressText = true
+	s.timer = time.NewTimer(timeout)
+	s.watchdog = s.timer.C
 	results := make(chan error, 1)
 	s.results = results
 	go func() {
 		results <- session.Abort(context.Background())
 	}()
+}
+
+func (s *runInterruptState) stopWatchdog() {
+	if s.timer != nil {
+		s.timer.Stop()
+	}
+	s.watchdog = nil
 }
 
 type runFinisher struct {
@@ -625,10 +821,36 @@ func runSessionStreaming(stateRaw json.RawMessage) (bool, error) {
 
 // Callers classify the primary error before joining secondary diagnostics.
 func classifyRunError(ctx context.Context, err error) (RunOutcome, error) {
-	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, ctx.Err())) {
-		return RunInterrupted, nil
+	if ctx.Err() != nil {
+		return RunInterrupted, withoutContextError(err, ctx.Err())
 	}
 	return RunCompleted, err
+}
+
+func withoutContextError(err, contextErr error) error {
+	return withoutExpectedErrors(err, contextErr)
+}
+
+func withoutExpectedErrors(err error, expected ...error) error {
+	if err == nil {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		parts := joined.Unwrap()
+		kept := make([]error, 0, len(parts))
+		for _, part := range parts {
+			if filtered := withoutExpectedErrors(part, expected...); filtered != nil {
+				kept = append(kept, filtered)
+			}
+		}
+		return errors.Join(kept...)
+	}
+	for _, target := range expected {
+		if target != nil && errors.Is(err, target) {
+			return withoutExpectedErrors(errors.Unwrap(err), expected...)
+		}
+	}
+	return err
 }
 
 func (f *runFinisher) finish(outcome RunOutcome, runErr error) (RunOutcome, error) {
@@ -651,8 +873,16 @@ func (f *runFinisher) finishWithClose(outcome RunOutcome, runErr error, force bo
 	var registryErr error
 	if err := f.storage.SetStatus(f.sessionID, store.StatusStopped); err != nil {
 		registryErr = fmt.Errorf("record stopped session: %w", err)
-	} else if _, err := fmt.Fprintf(f.stderr, "[session] id=%s status=stopped file=%s log=%s\n", f.sessionID, f.sessionFile, f.logPath); err != nil {
-		registryErr = fmt.Errorf("write final session details: %w", err)
+	} else {
+		var err error
+		if f.sessionFile == "" {
+			_, err = fmt.Fprintf(f.stderr, "[session] id=%s status=stopped log=%s\n", f.sessionID, f.logPath)
+		} else {
+			_, err = fmt.Fprintf(f.stderr, "[session] id=%s status=stopped file=%s log=%s\n", f.sessionID, f.sessionFile, f.logPath)
+		}
+		if err != nil {
+			registryErr = fmt.Errorf("write final session details: %w", err)
+		}
 	}
 	return outcome, errors.Join(runErr, closeErr, registryErr)
 }

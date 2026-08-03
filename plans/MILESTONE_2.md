@@ -35,11 +35,9 @@ Manager boundary):
   `ReadBytes('\n')` framing, `c-<n>` command correlation with 30s timeout,
   SIGTERM→5s→SIGKILL shutdown. M2 additionally relies on:
   - `Events()` closing after process exit (so the pump can detect death).
-  - The ability to distinguish a **pi command failure** (`success:false` response — e.g.
-    `get_entries` with an unknown `since`, rpc.md "get_entries") from a transport/timeout
-    error. Assumed as a typed error (e.g. `pisession.CommandError`); if M1 shaped this
-    differently, wrap at the Manager boundary. This distinction drives the SSE `reset`
-    path (§4.5).
+  - `GetEntries` maps only pi's exact `Entry not found: <since>` response to
+    `pisession.ErrInvalidCursor`; unrelated command, transport, and timeout errors remain
+    distinct. This distinction drives the SSE `reset` path (§4.5).
   - Raw entries from `GetEntries` (verbatim `json.RawMessage` per CONV §2); M2 extracts
     each entry's `id` itself with a minimal `{"id":...}` unmarshal, so it does not depend
     on M1 having parsed entries.
@@ -48,9 +46,10 @@ Manager boundary):
   reload-under-lock, and write-temp-then-rename replacement; CONV §5), session id
   generation
   (`s-<YYYYMMDD>-<6 [a-z0-9]>` with collision regeneration), registry record shape per
-  CONV §5. Assumed surface: `store.Open(checkoutPath)` returning a handle with
-  `List() / Get(id) / Put(record)`, allocation-locked `CreateSession`, `SetLive`, and
-  layout/log-path helpers.
+  CONV §5. Surface: `store.Open(checkoutPath)` returning a handle with strict
+  `List() ([]Record, error)` / `Get(id) (Record, bool, error)`, `Put(record)`,
+  context-cancellable allocation-locked `CreateSession`, `SetLive`, and layout/log-path
+  helpers.
 - `internal/fakepi` + `internal/pitest`: fakepi binary honoring `--session-id` /
   `--session-dir`, writing a real v3 session JSONL, answering `get_state`, `get_entries`
   (including `since` and `success:false` on unknown cursor), `get_session_stats`,
@@ -251,12 +250,11 @@ closes the duplicate window.
    returns exactly the missed entries; replay covers them; no dupes by the same
    mechanism as first attach.
 4. **Cursor == current leaf:** fetch returns zero entries (valid); prime + live.
-5. **Invalid cursor:** live session → pi answers `get_entries` with `success:false`
-   (rpc.md); non-live → cursor not found in the file. Both map to `ErrInvalidCursor` →
-   `reset` event `{"reason":"invalid_cursor"}` → close (CONV §4.2/§4.3 step 7). Any pi
-   command failure on this fetch is treated as invalid-cursor (it is the only documented
-   failure mode; worst case the client harmlessly refetches). Transport errors instead
-   end the stream without `reset`.
+5. **Invalid cursor:** live session → pi answers `get_entries` with its exact
+   `Entry not found: <since>` failure; non-live → cursor not found in the file. Both map
+   to `ErrInvalidCursor` → `reset` event `{"reason":"invalid_cursor"}` → close
+   (CONV §4.2/§4.3 step 7). Other pi command failures remain pi errors and end the stream
+   without `reset`, as do transport errors.
 6. **Overflow during a long replay:** the subscriber may be kicked while the handler is
    still replaying; the handler sees the closed channel at drain/live and terminates.
    Self-healing: the client reconnects with a further-along cursor, so each retry replays
@@ -384,8 +382,6 @@ Decisions local to M2 (not pinned by CONV; flagged per CONV §10):
    surface via CONV §5 rebuild semantics in M6.
 4. **Close idempotency** (200, current summary) and **list ordering**
    (`lastActivityAt` desc).
-5. **Any pi failure on the SSE fetch ⇒ `reset`** (§4.5 case 5) — pi documents no other
-   `get_entries` failure mode.
 
 Open question for the conventions author (does not block M2): whether `GET /api/sessions`
 should mark handle-less `live` registry records as `stopped` *in the response* before

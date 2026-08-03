@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -128,27 +129,31 @@ func (s *Store) SetStatus(id string, status Status) error {
 	})
 }
 
-func (s *Store) Get(id string) (Record, bool) {
-	mutex := checkoutMutex(s.gibsonDir())
-	mutex.Lock()
-	defer mutex.Unlock()
+func (s *Store) Get(id string) (Record, bool, error) {
+	lock := checkoutLock(s.gibsonDir())
+	if err := lock.lock(context.Background()); err != nil {
+		return Record{}, false, err
+	}
+	defer lock.unlock()
 
 	state, err := s.loadState()
 	if err != nil {
-		return Record{}, false
+		return Record{}, false, err
 	}
 	record, ok := state.Sessions[id]
-	return record, ok
+	return record, ok, nil
 }
 
-func (s *Store) List() []Record {
-	mutex := checkoutMutex(s.gibsonDir())
-	mutex.Lock()
-	defer mutex.Unlock()
+func (s *Store) List() ([]Record, error) {
+	lock := checkoutLock(s.gibsonDir())
+	if err := lock.lock(context.Background()); err != nil {
+		return nil, err
+	}
+	defer lock.unlock()
 
 	state, err := s.loadState()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	ids := make([]string, 0, len(state.Sessions))
 	for id := range state.Sessions {
@@ -159,7 +164,7 @@ func (s *Store) List() []Record {
 	for _, id := range ids {
 		records = append(records, state.Sessions[id])
 	}
-	return records
+	return records, nil
 }
 
 func validateTransition(from, to Status) error {
@@ -211,15 +216,24 @@ func normalizeTimestamp(value string) (string, error) {
 	return parsed.UTC().Format(time.RFC3339), nil
 }
 
-func (s *Store) withStoreLock(action func() error) (err error) {
+func (s *Store) withStoreLock(action func() error) error {
+	return s.withStoreLockContext(context.Background(), action)
+}
+
+func (s *Store) withStoreLockContext(ctx context.Context, action func() error) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.EnsureLayout(); err != nil {
 		return err
 	}
-	mutex := checkoutMutex(s.gibsonDir())
-	mutex.Lock()
-	defer mutex.Unlock()
+	process := checkoutLock(s.gibsonDir())
+	if err := process.lock(ctx); err != nil {
+		return fmt.Errorf("lock registry for checkout %s: %w", s.checkout, err)
+	}
+	defer process.unlock()
 
-	lock, err := lockDirectory(s.gibsonDir())
+	lock, err := lockDirectory(ctx, s.gibsonDir())
 	if err != nil {
 		return err
 	}
@@ -230,7 +244,11 @@ func (s *Store) withStoreLock(action func() error) (err error) {
 }
 
 func (s *Store) withLockedState(update func(*registry) error) error {
-	return s.withStoreLock(func() error {
+	return s.withLockedStateContext(context.Background(), update)
+}
+
+func (s *Store) withLockedStateContext(ctx context.Context, update func(*registry) error) error {
+	return s.withStoreLockContext(ctx, func() error {
 		state, err := s.loadState()
 		if err != nil {
 			return err

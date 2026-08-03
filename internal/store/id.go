@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -15,23 +16,14 @@ type SessionCreation struct {
 	Rollback func() error
 }
 
-func (s *Store) NewSessionID() (id string, err error) {
-	err = s.withLockedState(func(state *registry) error {
-		headers, err := s.loadSessionHeaders()
-		if err != nil {
-			return err
-		}
-		id, err = availableSessionID(state, headers, time.Now().UTC(), rand.Reader)
-		return err
-	})
-	return id, err
-}
-
-func (s *Store) CreateSession(create func(string) (SessionCreation, error)) (id string, err error) {
+func (s *Store) CreateSession(ctx context.Context, create func(string) (SessionCreation, error)) (id string, err error) {
+	if ctx == nil {
+		return "", errors.New("create session: context is required")
+	}
 	if create == nil {
 		return "", errors.New("create session: callback is required")
 	}
-	err = s.withLockedState(func(state *registry) error {
+	err = s.withLockedStateContext(ctx, func(state *registry) error {
 		headers, err := s.loadSessionHeaders()
 		if err != nil {
 			return err
