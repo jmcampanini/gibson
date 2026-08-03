@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"testing"
@@ -10,6 +11,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestWriteOutputRecordRejectsTextualUnicodeSeparatorEscapes(t *testing.T) {
+	for _, value := range []string{`left\u2028right`, `left\u2029right`} {
+		t.Run(value, func(t *testing.T) {
+			var output bytes.Buffer
+			pi := fakePi{out: &output}
+
+			err := pi.writeOutputRecord(map[string]string{"value": value}, []byte{'\n'}, true)
+
+			require.Error(t, err)
+			assert.Empty(t, output.Bytes())
+		})
+	}
+}
 
 func TestPromptAcceptanceImmediatelyReportsStreaming(t *testing.T) {
 	inputReader, inputWriter := io.Pipe()

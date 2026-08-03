@@ -1020,6 +1020,9 @@ func (p *fakePi) writeOutputRecord(value any, terminator []byte, literalUnicode 
 		return fmt.Errorf("encode protocol output: %w", err)
 	}
 	if literalUnicode {
+		if bytes.Contains(encoded, []byte(`\\u2028`)) || bytes.Contains(encoded, []byte(`\\u2029`)) {
+			return errors.New("encode literal Unicode protocol output: textual separator escape is ambiguous")
+		}
 		encoded = bytes.ReplaceAll(encoded, []byte(`\u2028`), []byte("\u2028"))
 		encoded = bytes.ReplaceAll(encoded, []byte(`\u2029`), []byte("\u2029"))
 	}
