@@ -26,7 +26,7 @@ func TestRegistryReadsReturnCorruptionErrors(t *testing.T) {
 	for name, contents := range tests {
 		t.Run(name, func(t *testing.T) {
 			storage := newTestStore(t)
-			require.NoError(t, os.WriteFile(storage.RegistryPath(), []byte(contents), 0o644))
+			require.NoError(t, os.WriteFile(storage.registryPath(), []byte(contents), 0o644))
 
 			record, ok, err := storage.Get("s-20260726-missing")
 			require.Error(t, err)
@@ -70,7 +70,7 @@ func TestRegistryPersistsVersionedSessionLifecycle(t *testing.T) {
 	require.NoError(t, storage.Touch(record.ID, touchedAt))
 	require.NoError(t, storage.SetStatus(record.ID, StatusStopped))
 
-	reopened := Open(storage.checkout)
+	reopened := mustOpen(t, storage.checkout)
 	got, ok := requireGet(t, reopened, record.ID)
 	require.True(t, ok)
 	want := record
@@ -80,7 +80,7 @@ func TestRegistryPersistsVersionedSessionLifecycle(t *testing.T) {
 	want.PID = 0
 	assert.Equal(t, want, got)
 
-	assertRegistryShape(t, storage.RegistryPath(), record.ID)
+	assertRegistryShape(t, storage.registryPath(), record.ID)
 
 	require.NoError(t, reopened.SetLive(record.ID, record.PID))
 	require.NoError(t, reopened.SetStatus(record.ID, StatusClosed))
@@ -107,7 +107,7 @@ func TestRegistrySerializesConcurrentMutationsWithoutPartialState(t *testing.T) 
 				return
 			default:
 			}
-			contents, err := os.ReadFile(storage.RegistryPath())
+			contents, err := os.ReadFile(storage.registryPath())
 			if err != nil {
 				readerErr <- err
 				return
@@ -143,7 +143,7 @@ func TestRegistrySerializesConcurrentMutationsWithoutPartialState(t *testing.T) 
 		require.NoError(t, err)
 	}
 
-	records := requireList(t, Open(storage.checkout))
+	records := requireList(t, mustOpen(t, storage.checkout))
 	require.Len(t, records, writers+1)
 	ids := make([]string, len(records))
 	for i, record := range records {
@@ -255,14 +255,14 @@ func TestStopIfLivePIDCannotStopAnotherOwner(t *testing.T) {
 func TestRegistryIgnoresLeftoverTemporaryFilesAndNormalizesMode(t *testing.T) {
 	storage := newTestStore(t)
 	require.NoError(t, storage.Put(testRecord(1)))
-	require.NoError(t, os.Chmod(storage.RegistryPath(), 0o600))
+	require.NoError(t, os.Chmod(storage.registryPath(), 0o600))
 	leftover := filepath.Join(storage.gibsonDir(), ".state-leftover.tmp")
 	require.NoError(t, os.WriteFile(leftover, []byte(`{"incomplete":`), 0o600))
 
 	require.NoError(t, storage.Put(testRecord(2)))
 
 	assert.FileExists(t, leftover)
-	info, err := os.Stat(storage.RegistryPath())
+	info, err := os.Stat(storage.registryPath())
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
 	assert.Len(t, requireList(t, storage), 2)
@@ -440,7 +440,7 @@ func TestRegistryMutationHelper(t *testing.T) {
 		return
 	}
 	require.NoError(t, os.WriteFile(os.Getenv("GIBSON_TEST_REGISTRY_STARTED"), []byte("started"), 0o600))
-	storage := Open(os.Getenv("GIBSON_TEST_REGISTRY_CHECKOUT"))
+	storage := mustOpen(t, os.Getenv("GIBSON_TEST_REGISTRY_CHECKOUT"))
 	record := testRecord(2)
 	require.NoError(t, storage.Put(record))
 	require.NoError(t, os.WriteFile(os.Getenv("GIBSON_TEST_REGISTRY_DONE"), []byte("done"), 0o600))
@@ -462,8 +462,15 @@ func requireList(t *testing.T, storage *Store) []Record {
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	storage := Open(t.TempDir())
+	storage := mustOpen(t, t.TempDir())
 	require.NoError(t, storage.EnsureLayout())
+	return storage
+}
+
+func mustOpen(t testing.TB, checkout string) *Store {
+	t.Helper()
+	storage, err := Open(checkout)
+	require.NoError(t, err)
 	return storage
 }
 

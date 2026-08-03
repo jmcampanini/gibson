@@ -51,12 +51,12 @@ type Session struct {
 	stderr           *os.File
 	logger           *log.Logger
 	processes        *ownedProcessTracker
-	done             chan struct{}
-	complete         chan struct{}
+	done             chan struct{} // closed by reap once exit is recorded, just before events closes
+	complete         chan struct{} // closed by reap last: full teardown is published
 	exitMu           sync.RWMutex
 	exitErr          error
 	shutdownOnce     sync.Once
-	shutdownDone     chan struct{}
+	shutdownDone     chan struct{} // closed when the shutdown routine finishes; teardown completion is `complete`
 	shutdownEscalate chan struct{}
 	escalateOnce     sync.Once
 	shutdownMu       sync.RWMutex
@@ -123,7 +123,7 @@ func SpawnWithCleanupContext(readinessCtx, cleanupCtx context.Context, cfg Confi
 	if logger == nil {
 		logger = log.New(io.Discard)
 	}
-	processes, err := newOwnedProcessTracker(cmd.Process.Pid)
+	processes, err := newOwnedProcessTracker(cmd.Process.Pid, logger)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = stdin.Close()
@@ -275,10 +275,18 @@ func (s *Session) RespondUI(id string, resolution UIResolution) error {
 	})
 }
 
+// Events returns the session's event stream. The channel is buffered (256) and
+// the stdout pump blocks when it fills — deliberate backpressure onto pi — so
+// the owner must drain promptly: a stalled consumer stalls response demux and
+// can time out unrelated pending commands. The channel closes only after the
+// process exit is fully recorded, so ExitErr is valid once the range ends.
 func (s *Session) Events() <-chan Event {
 	return s.rpc.events
 }
 
+// Close shuts pi down (SIGTERM, then SIGKILL on the whole owned tree after the
+// grace period) and is idempotent. Cancelling ctx escalates to an immediate
+// forced shutdown rather than abandoning the wait.
 func (s *Session) Close(ctx context.Context) error {
 	s.shutdownOnce.Do(func() {
 		go s.shutdown()
@@ -363,6 +371,8 @@ func (s *Session) shutdownError() error {
 	return s.shutdownErr
 }
 
+// Done closes once pi has been reaped and its exit recorded, immediately
+// before the events channel closes; ExitErr is valid after Done.
 func (s *Session) Done() <-chan struct{} {
 	return s.done
 }
@@ -381,6 +391,11 @@ func (s *Session) ID() string {
 	return s.id
 }
 
+// reap owns the teardown ordering invariant: the exit error is recorded before
+// any channel closes, and rpc.events — written only by the stdout pump — may be
+// closed here only after pumpDone proves the pump has exited. done closes
+// before events so consumers can observe Done, drain to channel close, then
+// read a fully populated ExitErr; complete closes last.
 func (s *Session) reap() {
 	waitErr := s.cmd.Wait()
 
@@ -444,6 +459,7 @@ type ownedProcessTracker struct {
 	rootGone bool
 	list     processListFunc
 	read     processReadFunc
+	logger   *log.Logger
 	mu       sync.Mutex
 	owned    map[int]processRecord
 	stopOnce sync.Once
@@ -451,8 +467,13 @@ type ownedProcessTracker struct {
 	done     chan struct{}
 }
 
-func newOwnedProcessTracker(rootPID int) (*ownedProcessTracker, error) {
-	return newOwnedProcessTrackerWith(rootPID, listProcesses, readProcessRecord)
+func newOwnedProcessTracker(rootPID int, logger *log.Logger) (*ownedProcessTracker, error) {
+	tracker, err := newOwnedProcessTrackerWith(rootPID, listProcesses, readProcessRecord)
+	if err != nil {
+		return nil, err
+	}
+	tracker.logger = logger
+	return tracker, nil
 }
 
 func newOwnedProcessTrackerWith(rootPID int, list processListFunc, read processReadFunc) (*ownedProcessTracker, error) {
@@ -471,6 +492,7 @@ func newOwnedProcessTrackerWith(rootPID int, list processListFunc, read processR
 		root:   root,
 		list:   list,
 		read:   read,
+		logger: log.New(io.Discard),
 		owned:  make(map[int]processRecord),
 		stopCh: make(chan struct{}),
 		done:   make(chan struct{}),
@@ -481,8 +503,12 @@ func (t *ownedProcessTracker) run() {
 	defer close(t.done)
 	ticker := time.NewTicker(processScanInterval)
 	defer ticker.Stop()
+	warned := false
 	for {
-		_ = t.capture()
+		if err := t.capture(); err != nil && !warned {
+			warned = true
+			t.logger.Warn("pi descendant tracking is degraded", "error", err)
+		}
 		select {
 		case <-t.stopCh:
 			return

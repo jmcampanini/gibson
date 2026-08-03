@@ -138,6 +138,11 @@ func TestRealPiNoPromptLifecycle(t *testing.T) {
 		break
 	}
 
+	// Tripwire for the exact-string cursor classification: real pi, not fakepi,
+	// must produce the wording GetEntries maps to ErrInvalidCursor.
+	_, _, badCursorErr := session.GetEntries(ctx, "bogus-cursor")
+	require.ErrorIs(t, badCursorErr, ErrInvalidCursor)
+
 	entriesAfterName, leafID, err := session.GetEntries(ctx, "")
 	require.NoError(t, err)
 	require.Len(t, entriesAfterName, len(entriesBeforeName)+1)

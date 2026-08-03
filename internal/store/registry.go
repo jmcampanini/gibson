@@ -45,7 +45,7 @@ func (s *Store) Put(record Record) error {
 			return fmt.Errorf("put session %q: already exists", record.ID)
 		}
 		state.Sessions[record.ID] = record
-		return s.write(s.RegistryPath(), *state)
+		return s.write(s.registryPath(), *state)
 	})
 }
 
@@ -57,7 +57,7 @@ func (s *Store) Touch(id string, at time.Time) error {
 		}
 		record.LastActivityAt = at.UTC().Format(time.RFC3339)
 		state.Sessions[id] = record
-		return s.write(s.RegistryPath(), *state)
+		return s.write(s.registryPath(), *state)
 	})
 }
 
@@ -79,7 +79,7 @@ func (s *Store) SetLive(id string, pid int) error {
 		record.Status = StatusLive
 		record.PID = pid
 		state.Sessions[id] = record
-		return s.write(s.RegistryPath(), *state)
+		return s.write(s.registryPath(), *state)
 	})
 }
 
@@ -96,7 +96,7 @@ func (s *Store) StopIfLivePID(id string, pid int) (bool, error) {
 		record.Status = StatusStopped
 		record.PID = 0
 		state.Sessions[id] = record
-		if err := s.write(s.RegistryPath(), *state); err != nil {
+		if err := s.write(s.registryPath(), *state); err != nil {
 			return err
 		}
 		stopped = true
@@ -125,7 +125,7 @@ func (s *Store) SetStatus(id string, status Status) error {
 			record.PID = 0
 		}
 		state.Sessions[id] = record
-		return s.write(s.RegistryPath(), *state)
+		return s.write(s.registryPath(), *state)
 	})
 }
 
@@ -258,34 +258,34 @@ func (s *Store) withLockedStateContext(ctx context.Context, update func(*registr
 }
 
 func (s *Store) loadState() (registry, error) {
-	contents, err := os.ReadFile(s.RegistryPath())
+	contents, err := os.ReadFile(s.registryPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return newRegistry(), nil
 	}
 	if err != nil {
-		return registry{}, fmt.Errorf("read registry %s: %w", s.RegistryPath(), err)
+		return registry{}, fmt.Errorf("read registry %s: %w", s.registryPath(), err)
 	}
 
 	var state registry
 	if err := json.Unmarshal(contents, &state); err != nil {
-		return registry{}, fmt.Errorf("decode registry %s: %w", s.RegistryPath(), err)
+		return registry{}, fmt.Errorf("decode registry %s: %w", s.registryPath(), err)
 	}
 	if state.Version != 1 {
-		return registry{}, fmt.Errorf("decode registry %s: unsupported version %d", s.RegistryPath(), state.Version)
+		return registry{}, fmt.Errorf("decode registry %s: unsupported version %d", s.registryPath(), state.Version)
 	}
 	if state.Sessions == nil {
 		state.Sessions = make(map[string]Record)
 	}
 	for id, record := range state.Sessions {
 		if record.ID != id {
-			return registry{}, fmt.Errorf("decode registry %s: session key %q contains id %q", s.RegistryPath(), id, record.ID)
+			return registry{}, fmt.Errorf("decode registry %s: session key %q contains id %q", s.registryPath(), id, record.ID)
 		}
 		normalized, err := normalizeRecord(record)
 		if err != nil {
-			return registry{}, fmt.Errorf("decode registry %s: %w", s.RegistryPath(), err)
+			return registry{}, fmt.Errorf("decode registry %s: %w", s.registryPath(), err)
 		}
 		if normalized != record {
-			return registry{}, fmt.Errorf("decode registry %s: session %q is not normalized", s.RegistryPath(), id)
+			return registry{}, fmt.Errorf("decode registry %s: session %q is not normalized", s.registryPath(), id)
 		}
 	}
 	return state, nil

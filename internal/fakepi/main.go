@@ -580,6 +580,11 @@ func (p *fakePi) executeScenario(run *scenarioRun) {
 	err := p.playScenario(run)
 	if err != nil {
 		p.fatal <- err
+	} else if err := p.respondPrompt(run); err != nil {
+		// Unconditional and idempotent: a scenario flag combination that never
+		// reached its dialog must not leave the prompt pending forever, because
+		// gibson's prompt wait is deliberately unbounded.
+		p.fatal <- err
 	}
 	p.finishRun(run)
 }

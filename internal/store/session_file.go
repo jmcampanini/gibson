@@ -23,7 +23,7 @@ func (s *Store) FindSessionFile(id string) (path string, err error) {
 		return "", errors.New("find session file: id is required")
 	}
 	err = s.withStoreLock(func() error {
-		headers, err := s.loadSessionHeaders()
+		headers, err := s.loadSessionHeaders(rejectEmptySessionFiles)
 		if err != nil {
 			return err
 		}
@@ -37,7 +37,14 @@ func (s *Store) FindSessionFile(id string) (path string, err error) {
 	return path, err
 }
 
-func (s *Store) loadSessionHeaders() (map[string]string, error) {
+type emptySessionFilePolicy bool
+
+const (
+	rejectEmptySessionFiles   emptySessionFilePolicy = false
+	tolerateEmptySessionFiles emptySessionFilePolicy = true
+)
+
+func (s *Store) loadSessionHeaders(emptyFiles emptySessionFilePolicy) (map[string]string, error) {
 	entries, err := os.ReadDir(s.SessionsDir())
 	if errors.Is(err, fs.ErrNotExist) {
 		return make(map[string]string), nil
@@ -60,6 +67,11 @@ func (s *Store) loadSessionHeaders() (map[string]string, error) {
 		}
 		if !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("read session header %s: not a regular file", path)
+		}
+		// A zero-length file holds no id and cannot collide; tolerating it during
+		// allocation keeps a spawn crashed before its header from wedging the checkout.
+		if emptyFiles == tolerateEmptySessionFiles && info.Size() == 0 {
+			continue
 		}
 		header, err := readSessionHeader(path)
 		if err != nil {

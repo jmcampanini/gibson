@@ -121,7 +121,9 @@ func TestRunTargetsNamedCheckoutWithIsolatedArtifacts(t *testing.T) {
 	}
 	assert.Equal(t, store.StatusStopped, record.Status)
 	assert.Zero(t, record.PID)
-	sessionPath, err := store.Open(target).FindSessionFile(record.ID)
+	targetStore, err := store.Open(target)
+	require.NoError(t, err)
+	sessionPath, err := targetStore.FindSessionFile(record.ID)
 	require.NoError(t, err)
 	contents, err := os.ReadFile(sessionPath)
 	require.NoError(t, err)
@@ -151,7 +153,7 @@ func TestRunRejectsInvalidCheckoutBeforePiResolutionOrSpawn(t *testing.T) {
 		resolvedPi = true
 		return "pi", nil
 	}
-	dependencies.spawn = func(context.Context, pisession.Config) (runSession, error) {
+	dependencies.spawn = func(context.Context, context.Context, pisession.Config) (runSession, error) {
 		spawned = true
 		return nil, errors.New("unexpected spawn")
 	}
@@ -177,7 +179,7 @@ func TestRunBufferedInterruptStopsBeforeStartup(t *testing.T) {
 	interrupts <- os.Interrupt
 	dependencies.interrupts = interrupts
 	spawned := false
-	dependencies.spawn = func(context.Context, pisession.Config) (runSession, error) {
+	dependencies.spawn = func(context.Context, context.Context, pisession.Config) (runSession, error) {
 		spawned = true
 		return nil, errors.New("unexpected spawn")
 	}
@@ -204,7 +206,7 @@ func TestRunInterruptCancelsVersionCheckBeforeSpawn(t *testing.T) {
 		return pisession.VersionResult{}, fmt.Errorf("%w: version command canceled: %w", pisession.ErrPiVersionExecution, ctx.Err())
 	}
 	spawned := false
-	dependencies.spawn = func(context.Context, pisession.Config) (runSession, error) {
+	dependencies.spawn = func(context.Context, context.Context, pisession.Config) (runSession, error) {
 		spawned = true
 		return nil, errors.New("unexpected spawn")
 	}
@@ -319,7 +321,7 @@ func TestRunSecondInterruptForcesStalledReadinessCleanup(t *testing.T) {
 	dependencies.interrupts = interrupts
 	readinessStarted := make(chan struct{})
 	readinessCancelled := make(chan struct{})
-	dependencies.spawnWithCleanup = func(readinessCtx, cleanupCtx context.Context, _ pisession.Config) (runSession, error) {
+	dependencies.spawn = func(readinessCtx, cleanupCtx context.Context, _ pisession.Config) (runSession, error) {
 		close(readinessStarted)
 		<-readinessCtx.Done()
 		close(readinessCancelled)
@@ -398,7 +400,7 @@ func TestRunRoutesHostileFakePiRecordsAfterConsumerBackpressure(t *testing.T) {
 	dependencies.resolvePiBin = pisession.ResolvePiBin
 	dependencies.checkPiVersion = pisession.CheckPiVersion
 	spawned := make(chan *pisession.Session, 1)
-	dependencies.spawn = func(ctx context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(ctx context.Context, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session, err := pisession.Spawn(ctx, cfg)
 		if err == nil {
 			spawned <- session
@@ -474,7 +476,7 @@ func TestRunRejectsUnknownTypeBeforeSpawningPi(t *testing.T) {
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
 	spawned := false
-	dependencies.spawn = func(context.Context, pisession.Config) (runSession, error) {
+	dependencies.spawn = func(context.Context, context.Context, pisession.Config) (runSession, error) {
 		spawned = true
 		return nil, errors.New("unexpected spawn")
 	}
@@ -587,7 +589,7 @@ func TestRunFinishesPromptHandledWithoutAgentRun(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		return newScriptedRunSession(cfg, make(chan pisession.Event)), nil
 	}
 
@@ -614,7 +616,7 @@ func TestRunInterruptFinishesPromptHandledWithoutAgentRun(t *testing.T) {
 	var releaseStateOnce sync.Once
 	releasePostPromptState := func() { releaseStateOnce.Do(func() { close(releaseState) }) }
 	t.Cleanup(releasePostPromptState)
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, make(chan pisession.Event))
 		stateCalls := 0
 		session.getState = func() (json.RawMessage, error) {
@@ -668,7 +670,7 @@ func TestRunRejectsAmbiguousIdleStateFromUnverifiedPi(t *testing.T) {
 	dependencies.checkPiVersion = func(context.Context, string) (pisession.VersionResult, error) {
 		return pisession.VersionResult{Found: "0.83.0", Verified: false}, nil
 	}
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		return newScriptedRunSession(cfg, make(chan pisession.Event)), nil
 	}
 
@@ -691,7 +693,7 @@ func TestRunWaitsForAgentSettledAfterPiReportsIdle(t *testing.T) {
 	stateObserved := make(chan struct{})
 	events := make(chan pisession.Event, 1)
 	events <- runEvent("agent_start", `{"type":"agent_start"}`)
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, events)
 		stateCalls := 0
 		session.getState = func() (json.RawMessage, error) {
@@ -743,7 +745,7 @@ func TestRunPrioritizesBufferedInterruptOverQueuedSettlement(t *testing.T) {
 	stateObserved := make(chan struct{})
 	events := make(chan pisession.Event, 2)
 	events <- runEvent("agent_start", `{"type":"agent_start"}`)
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, events)
 		stateCalls := 0
 		session.getState = func() (json.RawMessage, error) {
@@ -781,7 +783,7 @@ func TestRunAllowsAgentStartAfterPromptAcceptance(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		events := make(chan pisession.Event, 4)
 		stateChecked := make(chan struct{})
 		session := newScriptedRunSession(cfg, events)
@@ -818,7 +820,7 @@ func TestRunFailsWhenFinalAssistantReportsError(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		events := make(chan pisession.Event, 2)
 		events <- runEvent("message_end", `{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"provider unavailable"}}`)
 		events <- runEvent("agent_settled", `{"type":"agent_settled"}`)
@@ -849,7 +851,7 @@ func TestRunOmitsUnknownSessionFileFromFailureDetails(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, make(chan pisession.Event))
 		session.getState = func() (json.RawMessage, error) {
 			return nil, errors.New("state unavailable")
@@ -873,7 +875,7 @@ func TestRunInterruptClosesWithFreshContextAndStopsRegistryRecord(t *testing.T) 
 	prompted := make(chan struct{})
 	closed := make(chan bool, 1)
 	var session *scriptedRunSession
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session = &scriptedRunSession{
 			pid:      43210,
 			events:   make(chan pisession.Event),
@@ -940,7 +942,7 @@ func TestRunFirstInterruptFinishesOnDurableSettlementWithoutAbortResponse(t *tes
 	prompted := make(chan struct{})
 	abortCalled := make(chan struct{})
 	releaseAbort := make(chan struct{})
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, events)
 		session.prompted = prompted
 		session.state = bytes.Replace(session.state, []byte("false"), []byte("true"), 1)
@@ -1005,7 +1007,7 @@ func TestRunFirstInterruptTimesOutWhenPiNeverSettles(t *testing.T) {
 	abortCalled := make(chan struct{})
 	releaseAbort := make(chan struct{})
 	closeForced := make(chan bool, 1)
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, make(chan pisession.Event))
 		session.prompted = prompted
 		session.state = bytes.Replace(session.state, []byte("false"), []byte("true"), 1)
@@ -1070,7 +1072,7 @@ func TestRunAbortWatchdogSurvivesContinuousIdleEventDrain(t *testing.T) {
 	var releaseAbortOnce sync.Once
 	releaseAbortCommand := func() { releaseAbortOnce.Do(func() { close(releaseAbort) }) }
 	t.Cleanup(releaseAbortCommand)
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, events)
 		session.abort = func(context.Context) error {
 			close(abortCalled)
@@ -1124,7 +1126,7 @@ func TestRunInterruptUsesSettlementObservedBeforePromptResult(t *testing.T) {
 	events := make(chan pisession.Event)
 	eventsSent := make(chan struct{})
 	releasePrompt := make(chan struct{})
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, events)
 		session.prompt = func(context.Context, string, string) error {
 			events <- runEvent("agent_start", `{"type":"agent_start"}`)
@@ -1170,7 +1172,7 @@ func TestRunFirstInterruptCancelsPromptBeforeWrite(t *testing.T) {
 	promptWriteStarted := make(chan struct{})
 	promptCancelled := make(chan struct{})
 	abortCalled := make(chan struct{}, 1)
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, make(chan pisession.Event))
 		session.startPrompt = func(ctx context.Context, _, _ string) (<-chan error, error) {
 			close(promptWriteStarted)
@@ -1220,7 +1222,7 @@ func TestRunPromptWriteFailureAfterInterruptStaysInterrupted(t *testing.T) {
 	dependencies.interrupts = interrupts
 	promptWriteStarted := make(chan struct{})
 	releasePromptWrite := make(chan struct{})
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, make(chan pisession.Event))
 		session.startPrompt = func(context.Context, string, string) (<-chan error, error) {
 			close(promptWriteStarted)
@@ -1260,7 +1262,7 @@ func TestRunSecondInterruptForcesBlockedPromptWrite(t *testing.T) {
 	promptWriteStarted := make(chan struct{})
 	releasePromptWrite := make(chan struct{})
 	forcedClose := make(chan bool, 1)
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, make(chan pisession.Event))
 		session.startPrompt = func(context.Context, string, string) (<-chan error, error) {
 			close(promptWriteStarted)
@@ -1314,7 +1316,7 @@ func TestRunSecondInterruptForcesShutdown(t *testing.T) {
 	closeStarted := make(chan struct{})
 	forcedClose := make(chan bool, 1)
 	events := make(chan pisession.Event, 4)
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, events)
 		session.prompted = prompted
 		session.state = bytes.Replace(session.state, []byte("false"), []byte("true"), 1)
@@ -1377,7 +1379,7 @@ func TestRunCancellationKeepsInterruptedOutcomeWhenStdoutFinishFails(t *testing.
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
 	events := make(chan pisession.Event, 2)
 	stateChecked := make(chan struct{})
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, events)
 		session.state = bytes.Replace(session.state, []byte("false"), []byte("true"), 1)
 		stateCalls := 0
@@ -1446,7 +1448,7 @@ func TestRunBufferedInterruptWinsSelectedEventClosure(t *testing.T) {
 	events <- runEvent("agent_start", `{"type":"agent_start"}`)
 	events <- runEvent("message_update", `{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"partial"}}`)
 	close(events)
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		return newScriptedRunSession(cfg, events), nil
 	}
 	stdout := newBlockingFinishWriter()
@@ -1478,7 +1480,7 @@ func TestRunAttemptsRegistryCleanupWhenCloseFails(t *testing.T) {
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
 	prompted := make(chan struct{})
-	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+	dependencies.spawn = func(_, _ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, make(chan pisession.Event))
 		session.prompted = prompted
 		session.state = bytes.Replace(session.state, []byte("false"), []byte("true"), 1)
@@ -1519,8 +1521,8 @@ func defaultRunTestDependencies() runDependencies {
 		checkPiVersion: func(context.Context, string) (pisession.VersionResult, error) {
 			return pisession.VersionResult{Found: "0.82.1", Verified: true}, nil
 		},
-		spawn: func(ctx context.Context, cfg pisession.Config) (runSession, error) {
-			return pisession.Spawn(ctx, cfg)
+		spawn: func(readinessCtx, cleanupCtx context.Context, cfg pisession.Config) (runSession, error) {
+			return pisession.SpawnWithCleanupContext(readinessCtx, cleanupCtx, cfg)
 		},
 		now: func() time.Time { return time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC) },
 	}
@@ -1545,9 +1547,9 @@ type scriptedRunSession struct {
 	closeOnce   sync.Once
 }
 
-func (s *scriptedRunSession) StartPrompt(ctx context.Context, message, image string) (<-chan error, error) {
+func (s *scriptedRunSession) StartPrompt(ctx context.Context, message, behavior string) (<-chan error, error) {
 	if s.startPrompt != nil {
-		return s.startPrompt(ctx, message, image)
+		return s.startPrompt(ctx, message, behavior)
 	}
 	result := make(chan error, 1)
 	go func() {
@@ -1559,7 +1561,7 @@ func (s *scriptedRunSession) StartPrompt(ctx context.Context, message, image str
 			s.onPrompt()
 		}
 		if s.prompt != nil {
-			result <- s.prompt(ctx, message, image)
+			result <- s.prompt(ctx, message, behavior)
 			return
 		}
 		result <- nil
@@ -1829,4 +1831,24 @@ func readRunRegistry(t testing.TB, checkout string) runRegistryFile {
 	var registry runRegistryFile
 	require.NoError(t, json.Unmarshal(contents, &registry))
 	return registry
+}
+
+func TestFinishWithClosePrintsSessionDetailsWhenRegistryUpdateFails(t *testing.T) {
+	storage, err := store.Open(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, storage.EnsureLayout())
+	stderr := &bytes.Buffer{}
+	finisher := &runFinisher{
+		session:   &scriptedRunSession{},
+		storage:   storage,
+		stderr:    stderr,
+		sessionID: "s-20260726-abc123",
+		logPath:   "/tmp/pi.stderr.log",
+	}
+
+	outcome, err := finisher.finishWithClose(RunCompleted, nil, false, nil)
+
+	assert.Equal(t, RunCompleted, outcome)
+	require.ErrorContains(t, err, "record stopped session")
+	assert.Contains(t, stderr.String(), "[session] id=s-20260726-abc123 status=stopped")
 }

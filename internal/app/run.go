@@ -55,8 +55,7 @@ type runDependencies struct {
 	getwd            func() (string, error)
 	resolvePiBin     func(string) (string, error)
 	checkPiVersion   func(context.Context, string) (pisession.VersionResult, error)
-	spawn            func(context.Context, pisession.Config) (runSession, error)
-	spawnWithCleanup func(context.Context, context.Context, pisession.Config) (runSession, error)
+	spawn            func(readinessCtx, cleanupCtx context.Context, cfg pisession.Config) (runSession, error)
 	now              func() time.Time
 	interrupts       <-chan os.Signal
 	abortTimeout     time.Duration
@@ -146,10 +145,7 @@ func Run(ctx context.Context, options RunOptions, logger *log.Logger) (RunOutcom
 		getwd:          os.Getwd,
 		resolvePiBin:   pisession.ResolvePiBin,
 		checkPiVersion: pisession.CheckPiVersion,
-		spawn: func(ctx context.Context, cfg pisession.Config) (runSession, error) {
-			return pisession.Spawn(ctx, cfg)
-		},
-		spawnWithCleanup: func(readinessCtx, cleanupCtx context.Context, cfg pisession.Config) (runSession, error) {
+		spawn: func(readinessCtx, cleanupCtx context.Context, cfg pisession.Config) (runSession, error) {
 			return pisession.SpawnWithCleanupContext(readinessCtx, cleanupCtx, cfg)
 		},
 		now:          time.Now,
@@ -248,7 +244,10 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 		)
 	}
 
-	storage := store.Open(checkout)
+	storage, storageErr := store.Open(checkout)
+	if storageErr != nil {
+		return RunCompleted, storageErr
+	}
 	if startup.checkInterrupted() {
 		return RunInterrupted, nil
 	}
@@ -275,13 +274,7 @@ func run(ctx context.Context, options RunOptions, logger *log.Logger, dependenci
 				StderrPath: logPath,
 				Logger:     logger,
 			}
-			var spawned runSession
-			var spawnErr error
-			if dependencies.spawnWithCleanup != nil {
-				spawned, spawnErr = dependencies.spawnWithCleanup(startup.ctx, startup.cleanupCtx, spawnConfig)
-			} else {
-				spawned, spawnErr = dependencies.spawn(startup.ctx, spawnConfig)
-			}
+			spawned, spawnErr := dependencies.spawn(startup.ctx, startup.cleanupCtx, spawnConfig)
 			if spawnErr != nil {
 				return store.SessionCreation{}, spawnErr
 			}
@@ -887,7 +880,9 @@ func (f *runFinisher) finishWithClose(outcome RunOutcome, runErr error, force bo
 	var registryErr error
 	if err := f.storage.SetStatus(f.sessionID, store.StatusStopped); err != nil {
 		registryErr = fmt.Errorf("record stopped session: %w", err)
-	} else {
+	}
+	var presentErr error
+	{
 		var err error
 		if f.sessionFile == "" {
 			_, err = fmt.Fprintf(f.stderr, "[session] id=%s status=stopped log=%s\n", f.sessionID, f.logPath)
@@ -895,10 +890,10 @@ func (f *runFinisher) finishWithClose(outcome RunOutcome, runErr error, force bo
 			_, err = fmt.Fprintf(f.stderr, "[session] id=%s status=stopped file=%s log=%s\n", f.sessionID, f.sessionFile, f.logPath)
 		}
 		if err != nil {
-			registryErr = fmt.Errorf("write final session details: %w", err)
+			presentErr = fmt.Errorf("write final session details: %w", err)
 		}
 	}
-	return outcome, errors.Join(runErr, closeErr, registryErr)
+	return outcome, errors.Join(runErr, closeErr, registryErr, presentErr)
 }
 
 func closeRunSession(session runSession, force bool, interrupts <-chan os.Signal) error {

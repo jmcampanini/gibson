@@ -60,7 +60,9 @@ func checkPiVersion(ctx context.Context, bin string, timeout time.Duration) (Ver
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	output, err := exec.CommandContext(checkCtx, bin, "--version").CombinedOutput()
+	// Parse stdout only: stderr noise (wrapper warnings) may contain version-like
+	// tokens that must never win over the version pi actually reports.
+	output, err := exec.CommandContext(checkCtx, bin, "--version").Output()
 	if err != nil {
 		if errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
 			return VersionResult{}, fmt.Errorf("%w while running %q --version (checks are capped at %s)", ErrPiVersionTimeout, bin, timeout)
@@ -69,6 +71,12 @@ func checkPiVersion(ctx context.Context, bin string, timeout time.Duration) (Ver
 			return VersionResult{}, fmt.Errorf("%w: running %q --version was canceled: %w", ErrPiVersionExecution, bin, checkCtx.Err())
 		}
 		detail := strings.TrimSpace(string(output))
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if stderrDetail := strings.TrimSpace(string(exitErr.Stderr)); stderrDetail != "" {
+				detail = strings.TrimSpace(detail + " " + stderrDetail)
+			}
+		}
 		if detail != "" {
 			return VersionResult{}, fmt.Errorf("%w: %q --version: %v (output: %q)", ErrPiVersionExecution, bin, err, detail)
 		}

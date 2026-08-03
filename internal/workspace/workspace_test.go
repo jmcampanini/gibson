@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLocateFromCheckout(t *testing.T) {
@@ -13,9 +16,7 @@ func TestLocateFromCheckout(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	checkout := initRepository(t, filepath.Join(workspaceRoot, "checkout"))
 	nested := filepath.Join(checkout, "one", "two")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(nested, 0o755))
 
 	for _, test := range []struct {
 		name     string
@@ -26,15 +27,10 @@ func TestLocateFromCheckout(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := Locate(test.startDir)
-			if err != nil {
-				t.Fatalf("Locate() error = %v", err)
-			}
-			if got.LaunchCheckout != checkout {
-				t.Errorf("LaunchCheckout = %q, want %q", got.LaunchCheckout, checkout)
-			}
-			if got.Root != workspaceRoot {
-				t.Errorf("Root = %q, want %q", got.Root, workspaceRoot)
-			}
+
+			require.NoError(t, err)
+			assert.Equal(t, checkout, got.LaunchCheckout)
+			assert.Equal(t, workspaceRoot, got.Root)
 		})
 	}
 }
@@ -48,28 +44,19 @@ func TestLocateFromLinkedWorktree(t *testing.T) {
 	runGit(t, primary, "commit", "--quiet", "--allow-empty", "-m", "initial")
 
 	workspaceRoot := filepath.Join(tempRoot, "workspace")
-	if err := os.MkdirAll(workspaceRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(workspaceRoot, 0o755))
 	linkedCheckout := filepath.Join(workspaceRoot, "linked")
 	runGit(t, primary, "worktree", "add", "--quiet", "--detach", linkedCheckout, "HEAD")
 
 	nested := filepath.Join(linkedCheckout, "nested")
-	if err := os.Mkdir(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.Mkdir(nested, 0o755))
 
 	for _, startDir := range []string{linkedCheckout, nested} {
 		got, err := Locate(startDir)
-		if err != nil {
-			t.Fatalf("Locate(%q) error = %v", startDir, err)
-		}
-		if got.LaunchCheckout != linkedCheckout {
-			t.Errorf("Locate(%q).LaunchCheckout = %q, want %q", startDir, got.LaunchCheckout, linkedCheckout)
-		}
-		if got.Root != workspaceRoot {
-			t.Errorf("Locate(%q).Root = %q, want %q", startDir, got.Root, workspaceRoot)
-		}
+
+		require.NoError(t, err, "Locate(%q)", startDir)
+		assert.Equal(t, linkedCheckout, got.LaunchCheckout, "Locate(%q).LaunchCheckout", startDir)
+		assert.Equal(t, workspaceRoot, got.Root, "Locate(%q).Root", startDir)
 	}
 }
 
@@ -78,12 +65,9 @@ func TestLocateOutsideCheckout(t *testing.T) {
 	outside := t.TempDir()
 
 	got, err := Locate(outside)
-	if err == nil {
-		t.Fatalf("Locate() = %#v, want error", got)
-	}
-	if !strings.Contains(err.Error(), "no Git checkout found") {
-		t.Fatalf("Locate() error = %q, want a clear non-checkout error", err)
-	}
+
+	require.Error(t, err, "Locate() = %#v, want error", got)
+	assert.ErrorContains(t, err, "no Git checkout found")
 }
 
 func isolateGitEnvironment(t *testing.T) {
@@ -94,13 +78,9 @@ func isolateGitEnvironment(t *testing.T) {
 			continue
 		}
 		value := os.Getenv(key)
-		if err := os.Unsetenv(key); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, os.Unsetenv(key))
 		t.Cleanup(func() {
-			if err := os.Setenv(key, value); err != nil {
-				t.Errorf("restore %s: %v", key, err)
-			}
+			assert.NoError(t, os.Setenv(key, value), "restore %s", key)
 		})
 	}
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
@@ -109,9 +89,7 @@ func isolateGitEnvironment(t *testing.T) {
 
 func initRepository(t *testing.T, path string) string {
 	t.Helper()
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(path, 0o755))
 	runGit(t, path, "init", "--quiet")
 	return path
 }
@@ -121,7 +99,5 @@ func runGit(t *testing.T, dir string, args ...string) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
-	}
+	require.NoError(t, err, "git %s:\n%s", strings.Join(args, " "), output)
 }

@@ -936,7 +936,7 @@ func startLifecycleProcessHoldingStdout(t testing.TB, script string) (*Session, 
 	require.NoError(t, cmd.Start())
 
 	logger := log.New(bytes.NewBuffer(nil))
-	processes, err := newOwnedProcessTracker(cmd.Process.Pid)
+	processes, err := newOwnedProcessTracker(cmd.Process.Pid, logger)
 	require.NoError(t, err)
 	session := &Session{
 		id:               "lifecycle-test",
