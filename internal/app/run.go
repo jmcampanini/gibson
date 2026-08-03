@@ -438,27 +438,11 @@ promptWait:
 				}
 				settled, eventErr := handleEvent(event)
 				if eventErr != nil {
-					runErr := errors.Join(eventErr, presenter.finishText())
-					if interrupt.started {
-						return finishInterrupted(false, runErr)
-					}
-					return finisher.finish(RunCompleted, runErr)
+					return finishEventError(eventErr)
 				}
 				if settled {
-					if interrupt.started {
-						if interrupt.complete {
-							return finishInterrupted(false, nil)
-						}
-						continue
-					}
-					select {
-					case <-interrupts:
-						if done, outcome, interruptErr := handleInterrupt(); done {
-							return outcome, interruptErr
-						}
-						continue
-					default:
-						return finisher.finish(RunCompleted, errors.Join(presenter.finalAssistantErr, presenter.finishText()))
+					if done, outcome, finishErr := finishSettled(); done {
+						return outcome, finishErr
 					}
 				}
 				continue
@@ -515,27 +499,11 @@ promptWait:
 			}
 			settled, eventErr := handleEvent(event)
 			if eventErr != nil {
-				runErr := errors.Join(eventErr, presenter.finishText())
-				if interrupt.started {
-					return finishInterrupted(false, runErr)
-				}
-				return finisher.finish(RunCompleted, runErr)
+				return finishEventError(eventErr)
 			}
 			if settled {
-				if interrupt.started {
-					if interrupt.complete {
-						return finishInterrupted(false, nil)
-					}
-					continue
-				}
-				select {
-				case <-interrupts:
-					if done, outcome, interruptErr := handleInterrupt(); done {
-						return outcome, interruptErr
-					}
-					continue
-				default:
-					return finisher.finish(RunCompleted, errors.Join(presenter.finalAssistantErr, presenter.finishText()))
+				if done, outcome, finishErr := finishSettled(); done {
+					return outcome, finishErr
 				}
 			}
 		case result := <-stateResults:
