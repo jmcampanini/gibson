@@ -166,7 +166,8 @@ algorithm (server side, per client):
    (subscribe-before-fetch) or duplicated (fetched-id set).
 6. **Prime**: emit a `status` event with the current status, and, if a dialog is pending,
    a `dialog` event — so a pure SSE reconnect recovers actionable state without REST.
-7. Invalid cursor (pi returns `success:false`): send `reset`, close. Client refetches
+7. Invalid cursor (pi returns the exact `Entry not found: <since>` command failure): send
+   `reset`, close. Other command failures remain pi errors. The client refetches
    `/history` and reconnects fresh.
 
 **Deliberately lossy, by design:** deltas, tool updates, queue/status/ui events missed

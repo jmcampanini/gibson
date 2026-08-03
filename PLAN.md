@@ -408,7 +408,7 @@ Chunks 1–6.
 
 ### Mandatory approval gate
 
-- [ ] Present hostile-record and extension-boundary evidence, then receive explicit
+- [x] Present hostile-record and extension-boundary evidence, then receive explicit
   approval before beginning Chunk 8.
 
 ## Chunk 8 — Complete M1 acceptance
@@ -419,16 +419,16 @@ Add no planned product capability. Validate the complete M1 contract from a clea
 workspace through the compiled binary and a real pi installation, correcting only defects
 that prevent the already-specified behavior from passing.
 
-- [ ] Run every repository formatting, module, lint, race, build, and CLI gate.
-- [ ] Run the gated no-prompt lifecycle and deterministic prompt-ordering real-pi checks.
-- [ ] Execute the complete numbered M1 acceptance workflow with a compiled Gibson binary,
+- [x] Run every repository formatting, module, lint, race, build, and CLI gate.
+- [x] Run the gated no-prompt lifecycle and deterministic prompt-ordering real-pi checks.
+- [x] Execute the complete numbered M1 acceptance workflow with a compiled Gibson binary,
   scratch launch checkout, and sibling checkout.
-- [ ] Capture evidence for the real-prompt happy path, artifact identity, registry state,
+- [x] Capture evidence for the real-prompt happy path, artifact identity, registry state,
   graceful interruption, invalid inputs, checkout isolation, clean Git state, and absence
   of orphan processes.
-- [ ] Sweep the implementation and plan against every M1 acceptance criterion without
+- [x] Sweep the implementation and plan against every M1 acceptance criterion without
   pulling HTTP, SSE, session-manager, browser, resume, or full dialog UX work forward.
-- [ ] Remove Chunk 4's transitional interrupt paths and obsolete scripted-session test
+- [x] Remove Chunk 4's transitional interrupt paths and obsolete scripted-session test
   scaffolding; retain its narrow session interface only if it still represents a genuine
   production boundary after the final fake-pi scenarios land.
 
@@ -438,23 +438,23 @@ At this step, revalidate each final post-Chunk-5 review finding against the comp
 workflow. Fix it at its faithful owner or record an explicit later-milestone disposition;
 do not silently drop it and do not pull unrelated HTTP or browser scope forward.
 
-- [ ] Make pre-prompt startup interruption coherent: no prompt or tool work begins after a
+- [x] Make pre-prompt startup interruption coherent: no prompt or tool work begins after a
   buffered SIGINT, startup cancellation maps to exit 130, the checkout allocation-lock
   wait is interruptible, and a second interrupt can force a stalled readiness/version
   path.
-- [ ] Harden Linux process-disappearance handling: treat `ESRCH` as not-exists, prevent
+- [x] Harden Linux process-disappearance handling: treat `ESRCH` as not-exists, prevent
   unrelated per-PID churn from aborting the whole cleanup scan, and do not permanently
   latch root disappearance from a transient identity-read error.
-- [ ] Decide and prove the maximum single-interrupt wait when pi accepts an abort write but
-  never responds, preserving the durable-abort preference and immediate second-interrupt
-  escape hatch.
-- [ ] Narrow `GetEntries` cursor classification so only pi's actual missing-entry response
+- [x] Prove the selected 10-second durable-settlement wait when pi accepts an abort write
+  but never responds, with durable settlement sufficient by itself, normal shutdown on
+  timeout, and the immediate second-interrupt escape hatch.
+- [x] Narrow `GetEntries` cursor classification so only pi's actual missing-entry response
   becomes `ErrInvalidCursor`; preserve unrelated command failures for future consumers.
-- [ ] Preserve useful diagnostics when cancellation races another failure while retaining
+- [x] Preserve useful diagnostics when cancellation races another failure while retaining
   exit 130, and avoid presenting an empty session-file field before pi reports the path.
-- [ ] Remove the unused `NewSessionID` export or document that it does not reserve the
+- [x] Remove the unused `NewSessionID` export or document that it does not reserve the
   returned ID; keep `CreateSession` as the only safe allocation-and-creation path.
-- [ ] Make registry reads return strict load and validation errors instead of presenting a
+- [x] Make registry reads return strict load and validation errors instead of presenting a
   corrupt registry as empty or not found; complete this before M2 adopts the read surface.
 
 ### Dependencies
@@ -463,14 +463,14 @@ Chunks 1–7.
 
 ### Verification criteria
 
-- [ ] `make verify` passes.
-- [ ] `GIBSON_TEST_REAL_PI=1 go test ./internal/pisession/ -run RealPi -v` passes.
-- [ ] A real one-shot prompt streams successfully and creates a matching session file,
+- [x] `make verify` passes.
+- [x] `GIBSON_TEST_REAL_PI=1 go test ./internal/pisession/ -run RealPi -v` passes.
+- [x] A real one-shot prompt streams successfully and creates a matching session file,
   registry record, and stderr log.
-- [ ] First and second interrupts, crashes, unknown types, invalid checkouts, large records,
+- [x] First and second interrupts, crashes, unknown types, invalid checkouts, large records,
   and blocking dialogs satisfy their final M1 outcomes without orphaned pi processes.
-- [ ] Launch-checkout and sibling-checkout runs remain isolated and Git-clean.
-- [ ] Every numbered step in §8 of
+- [x] Launch-checkout and sibling-checkout runs remain isolated and Git-clean.
+- [x] Every numbered step in §8 of
   `~/Code/github.com/jmcampanini/gibson/main/plans/MILESTONE_1.md` passes.
 
 ### Mandatory approval gate

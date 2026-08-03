@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -184,6 +185,69 @@ func TestSessionStartPromptReturnsAfterWriteBeforeAcceptance(t *testing.T) {
 	require.NoError(t, <-peerResult)
 	waitFor(t, client.pumpDone, "RPC pump")
 	stopRPC(t, client)
+}
+
+func TestSessionGetEntriesClassifiesOnlyExactMissingEntryFailure(t *testing.T) {
+	tests := []struct {
+		name          string
+		message       string
+		invalidCursor bool
+	}{
+		{name: "actual pi missing entry", message: "Entry not found: cursor-1", invalidCursor: true},
+		{name: "unrelated command failure", message: "session store unavailable"},
+		{name: "different case", message: "entry not found: cursor-1"},
+		{name: "different cursor", message: "Entry not found: cursor-2"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			piOutput, writePiOutput := io.Pipe()
+			readCommands, piInput := io.Pipe()
+			client := newRPCClient(piOutput, piInput, nil)
+			client.commandTimeout = time.Second
+			session := &Session{rpc: client}
+			peerResult := make(chan error, 1)
+			go func() {
+				defer closePeer(readCommands, writePiOutput)
+				line, err := bufio.NewReader(readCommands).ReadBytes('\n')
+				if err != nil {
+					peerResult <- err
+					return
+				}
+				var command struct {
+					ID    string `json:"id"`
+					Type  string `json:"type"`
+					Since string `json:"since"`
+				}
+				if err := json.Unmarshal(line, &command); err != nil {
+					peerResult <- err
+					return
+				}
+				if command.Type != "get_entries" || command.Since != "cursor-1" {
+					peerResult <- fmt.Errorf("unexpected get_entries command: %+v", command)
+					return
+				}
+				peerResult <- writeJSONLine(writePiOutput, map[string]any{
+					"id": command.ID, "type": "response", "command": "get_entries",
+					"success": false, "error": test.message,
+				})
+			}()
+
+			_, _, err := session.GetEntries(context.Background(), "cursor-1")
+			require.Error(t, err)
+			if test.invalidCursor {
+				assert.ErrorIs(t, err, ErrInvalidCursor)
+			} else {
+				assert.NotErrorIs(t, err, ErrInvalidCursor)
+				var commandErr *commandError
+				require.ErrorAs(t, err, &commandErr)
+				assert.Equal(t, test.message, commandErr.message)
+			}
+			require.NoError(t, <-peerResult)
+			waitFor(t, client.pumpDone, "RPC pump")
+			stopRPC(t, client)
+		})
+	}
 }
 
 func TestSessionTypedCommands(t *testing.T) {
@@ -531,6 +595,82 @@ func TestOwnedProcessTrackerRejectsReusedRootAndDescendantPIDs(t *testing.T) {
 	assert.NotContains(t, tracker.owned, 102)
 }
 
+func TestOwnedProcessTrackerRecoversFromTransientRootReadError(t *testing.T) {
+	root := processRecord{pid: 100, ppid: 1, pgid: 100, started: "root"}
+	child := processRecord{pid: 101, ppid: 100, pgid: 100, started: "child"}
+	records := []processRecord{root, child}
+	transientErr := errors.New("temporary process read failure")
+	failRootRead := false
+	list := func() ([]processRecord, error) {
+		return append([]processRecord(nil), records...), nil
+	}
+	read := func(pid int) (processRecord, bool, error) {
+		if pid == root.pid && failRootRead {
+			failRootRead = false
+			return processRecord{}, false, transientErr
+		}
+		for _, record := range records {
+			if record.pid == pid {
+				return record, true, nil
+			}
+		}
+		return processRecord{}, false, nil
+	}
+	tracker, err := newOwnedProcessTrackerWith(root.pid, list, read)
+	require.NoError(t, err)
+	failRootRead = true
+	require.ErrorIs(t, tracker.capture(), transientErr)
+	assert.False(t, tracker.rootGone)
+	assert.Empty(t, tracker.owned)
+
+	require.NoError(t, tracker.capture())
+	assert.False(t, tracker.rootGone)
+	assert.Contains(t, tracker.owned, child.pid)
+}
+
+func TestOwnedProcessTrackerContinuesAfterDescendantReadChurn(t *testing.T) {
+	tests := []struct {
+		name      string
+		readErr   error
+		wantError bool
+	}{
+		{name: "disappeared", readErr: syscall.ESRCH},
+		{name: "permission churn", readErr: syscall.EACCES, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := processRecord{pid: 100, ppid: 1, pgid: 100, started: "root"}
+			vanished := processRecord{pid: 101, ppid: 100, pgid: 100, started: "vanished"}
+			survivor := processRecord{pid: 102, ppid: 100, pgid: 100, started: "survivor"}
+			records := []processRecord{root, vanished, survivor}
+			list := func() ([]processRecord, error) {
+				return append([]processRecord(nil), records...), nil
+			}
+			read := func(pid int) (processRecord, bool, error) {
+				if pid == vanished.pid {
+					return processRecord{}, false, test.readErr
+				}
+				for _, record := range records {
+					if record.pid == pid {
+						return record, true, nil
+					}
+				}
+				return processRecord{}, false, nil
+			}
+			tracker, err := newOwnedProcessTrackerWith(root.pid, list, read)
+			require.NoError(t, err)
+			err = tracker.capture()
+			if test.wantError {
+				require.ErrorIs(t, err, test.readErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.NotContains(t, tracker.owned, vanished.pid)
+			assert.Contains(t, tracker.owned, survivor.pid)
+		})
+	}
+}
+
 func TestOwnedProcessTrackerRejectsMixedSnapshotAncestry(t *testing.T) {
 	snapshot := []processRecord{
 		{pid: 100, ppid: 1, pgid: 100, started: "root"},
@@ -704,6 +844,57 @@ func TestSessionCloseEscalatesAndUnblocksFullEvents(t *testing.T) {
 	assert.Equal(t, syscall.SIGKILL, status.Signal())
 	for range session.Events() {
 	}
+}
+
+func TestSpawnWithCleanupContextForcesFailedReadinessCleanup(t *testing.T) {
+	cwd := t.TempDir()
+	pidPath := filepath.Join(cwd, "pi.pid")
+	piBin := filepath.Join(cwd, "unready-pi")
+	script := fmt.Sprintf("#!/bin/sh\ntrap '' TERM\nprintf '%%s' $$ > %q\nwhile :; do sleep 60; done\n", pidPath)
+	require.NoError(t, os.WriteFile(piBin, []byte(script), 0o700))
+	cfg := Config{
+		PiBin:      piBin,
+		SessionID:  "s-forced-readiness-cleanup",
+		SessionDir: filepath.Join(cwd, "sessions"),
+		Cwd:        cwd,
+		StderrPath: filepath.Join(cwd, "logs", "pi.stderr.log"),
+	}
+	readinessCtx, cancelReadiness := context.WithCancel(context.Background())
+	cleanupCtx, cancelCleanup := context.WithCancel(context.Background())
+	defer cancelReadiness()
+	defer cancelCleanup()
+	type spawnResult struct {
+		session *Session
+		err     error
+	}
+	result := make(chan spawnResult, 1)
+	go func() {
+		session, err := SpawnWithCleanupContext(readinessCtx, cleanupCtx, cfg)
+		result <- spawnResult{session: session, err: err}
+	}()
+
+	require.Eventually(t, func() bool {
+		contents, err := os.ReadFile(pidPath)
+		return err == nil && len(contents) > 0
+	}, 5*time.Second, 10*time.Millisecond)
+	pid := readProcessID(t, pidPath)
+	t.Cleanup(func() { _ = signalProcessGroup(pid, syscall.SIGKILL) })
+	started := time.Now()
+	cancelReadiness()
+	time.Sleep(50 * time.Millisecond)
+	cancelCleanup()
+
+	select {
+	case spawned := <-result:
+		assert.Nil(t, spawned.session)
+		require.Error(t, spawned.err)
+		assert.ErrorIs(t, spawned.err, context.Canceled)
+		assert.Contains(t, spawned.err.Error(), "probe pi readiness")
+	case <-time.After(2 * time.Second):
+		t.Fatal("forced failed-readiness cleanup waited for the normal five-second bound")
+	}
+	assert.Less(t, time.Since(started), 2*time.Second)
+	require.Eventually(t, func() bool { return !processExists(pid) }, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestSpawnCleansUpAfterReadinessFailure(t *testing.T) {

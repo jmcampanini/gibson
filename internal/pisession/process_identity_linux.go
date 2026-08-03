@@ -19,15 +19,22 @@ func listProcesses() ([]processRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list processes: %w", err)
 	}
-	records := make([]processRecord, 0, len(entries))
+	pids := make([]int, 0, len(entries))
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
+		if err == nil {
+			pids = append(pids, pid)
 		}
-		record, exists, err := readProcessRecord(pid)
+	}
+	return readListedProcesses(pids, readProcessRecord)
+}
+
+func readListedProcesses(pids []int, read processReadFunc) ([]processRecord, error) {
+	records := make([]processRecord, 0, len(pids))
+	for _, pid := range pids {
+		record, exists, err := read(pid)
 		if err != nil {
-			if errors.Is(err, os.ErrPermission) {
+			if isProcessDisappearance(err) || errors.Is(err, os.ErrPermission) {
 				continue
 			}
 			return nil, err
@@ -42,7 +49,7 @@ func listProcesses() ([]processRecord, error) {
 func readProcessRecord(pid int) (processRecord, bool, error) {
 	contents, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if isProcessDisappearance(err) {
 			return processRecord{}, false, nil
 		}
 		return processRecord{}, false, fmt.Errorf("read process %d: %w", pid, err)
@@ -77,13 +84,13 @@ func signalProcessIfOwned(owned processRecord, signal syscall.Signal) error {
 		if !exists || current.started != owned.started {
 			return nil
 		}
-		if err := unix.PidfdSendSignal(pidfd, unix.Signal(signal), nil, 0); err != nil && !errors.Is(err, syscall.ESRCH) {
+		if err := unix.PidfdSendSignal(pidfd, unix.Signal(signal), nil, 0); err != nil && !isProcessDisappearance(err) {
 			return err
 		}
 		return nil
 	}
 	if !errors.Is(err, syscall.ENOSYS) && !errors.Is(err, syscall.EINVAL) {
-		if errors.Is(err, syscall.ESRCH) {
+		if isProcessDisappearance(err) {
 			return nil
 		}
 		return err
@@ -96,7 +103,7 @@ func signalProcessIfOwned(owned processRecord, signal syscall.Signal) error {
 	if !exists || current.started != owned.started {
 		return nil
 	}
-	if err := syscall.Kill(owned.pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := syscall.Kill(owned.pid, signal); err != nil && !isProcessDisappearance(err) {
 		return err
 	}
 	return nil

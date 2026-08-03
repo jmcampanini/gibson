@@ -169,52 +169,189 @@ func TestRunRejectsInvalidCheckoutBeforePiResolutionOrSpawn(t *testing.T) {
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
-func TestRunBufferedInterruptCannotOvertakeFakePiPrompt(t *testing.T) {
-	t.Setenv("FAKEPI_SCENARIO", "slow_stream")
-	piBin := pitest.BuildFakePi(t)
-	ws := testws.New(t,
-		testws.WithPiBin(piBin),
-		testws.WithSessionType("quick", config.SessionType{Description: "Quick task"}),
-	)
+func TestRunBufferedInterruptStopsBeforeStartup(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick task"}))
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
-	dependencies.resolvePiBin = pisession.ResolvePiBin
-	dependencies.checkPiVersion = pisession.CheckPiVersion
 	interrupts := make(chan os.Signal, 2)
 	interrupts <- os.Interrupt
 	dependencies.interrupts = interrupts
-	stdout := newObservedBuffer()
-	var stderr bytes.Buffer
+	spawned := false
+	dependencies.spawn = func(context.Context, pisession.Config) (runSession, error) {
+		spawned = true
+		return nil, errors.New("unexpected spawn")
+	}
+
+	outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "stream"}, log.New(&bytes.Buffer{}), dependencies)
+
+	require.NoError(t, err)
+	assert.Equal(t, RunInterrupted, outcome)
+	assert.False(t, spawned)
+	_, statErr := os.Stat(filepath.Join(ws.Checkout, ".gibson"))
+	assert.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestRunInterruptCancelsVersionCheckBeforeSpawn(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick task"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	interrupts := make(chan os.Signal, 2)
+	dependencies.interrupts = interrupts
+	versionStarted := make(chan struct{})
+	dependencies.checkPiVersion = func(ctx context.Context, _ string) (pisession.VersionResult, error) {
+		close(versionStarted)
+		<-ctx.Done()
+		return pisession.VersionResult{}, fmt.Errorf("%w: version command canceled: %w", pisession.ErrPiVersionExecution, ctx.Err())
+	}
+	spawned := false
+	dependencies.spawn = func(context.Context, pisession.Config) (runSession, error) {
+		spawned = true
+		return nil, errors.New("unexpected spawn")
+	}
 	type result struct {
 		outcome RunOutcome
 		err     error
 	}
 	finished := make(chan result, 1)
 	go func() {
-		outcome, err := run(context.Background(), RunOptions{
-			Type: "quick", Message: "stream", Stdout: stdout, Stderr: &stderr,
-		}, log.New(&stderr), dependencies)
+		outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "wait"}, log.New(&bytes.Buffer{}), dependencies)
 		finished <- result{outcome: outcome, err: err}
 	}()
+
+	waitRunSignal(t, versionStarted, "version check")
+	interrupts <- os.Interrupt
 
 	select {
 	case got := <-finished:
 		require.NoError(t, got.err)
 		assert.Equal(t, RunInterrupted, got.outcome)
-	case <-time.After(10 * time.Second):
-		t.Fatal("run did not finish durable abort")
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not cancel version check")
 	}
-	assert.NotContains(t, stdout.String(), "deterministic deltas")
-	assert.Contains(t, stderr.String(), "status=stopped")
+	assert.False(t, spawned)
+}
 
-	sessionFiles, err := filepath.Glob(filepath.Join(ws.Checkout, ".gibson", "sessions", "*.jsonl"))
-	require.NoError(t, err)
-	require.Len(t, sessionFiles, 1)
-	assert.Equal(t, []string{"aborted"}, assistantStopReasons(t, sessionFiles[0]))
-	registry := readRunRegistry(t, ws.Checkout)
-	for _, record := range registry.Sessions {
-		assert.Equal(t, store.StatusStopped, record.Status)
-		assert.Zero(t, record.PID)
+func TestRunInterruptPreservesIndependentVersionFailure(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick task"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	interrupts := make(chan os.Signal, 2)
+	dependencies.interrupts = interrupts
+	versionStarted := make(chan struct{})
+	versionFailure := fmt.Errorf("%w: exited with status 1", pisession.ErrPiVersionExecution)
+	dependencies.checkPiVersion = func(ctx context.Context, _ string) (pisession.VersionResult, error) {
+		close(versionStarted)
+		<-ctx.Done()
+		return pisession.VersionResult{}, versionFailure
+	}
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "wait"}, log.New(&bytes.Buffer{}), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
+
+	waitRunSignal(t, versionStarted, "version check")
+	interrupts <- os.Interrupt
+
+	select {
+	case got := <-finished:
+		require.ErrorIs(t, got.err, pisession.ErrPiVersionExecution)
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not retain version failure after interrupt")
+	}
+}
+
+func TestRunSecondInterruptEscapesStalledVersionCheck(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick task"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	interrupts := make(chan os.Signal, 2)
+	dependencies.interrupts = interrupts
+	versionStarted := make(chan struct{})
+	releaseVersion := make(chan struct{})
+	versionDone := make(chan struct{})
+	dependencies.checkPiVersion = func(context.Context, string) (pisession.VersionResult, error) {
+		defer close(versionDone)
+		close(versionStarted)
+		<-releaseVersion
+		return pisession.VersionResult{}, errors.New("version check released")
+	}
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "wait"}, log.New(&bytes.Buffer{}), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
+
+	waitRunSignal(t, versionStarted, "version check")
+	interrupts <- os.Interrupt
+	select {
+	case got := <-finished:
+		t.Fatalf("first interrupt unexpectedly abandoned version check: outcome=%v err=%v", got.outcome, got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	interrupts <- os.Interrupt
+
+	select {
+	case got := <-finished:
+		require.NoError(t, got.err)
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("second interrupt did not escape stalled version check")
+	}
+	close(releaseVersion)
+	waitRunSignal(t, versionDone, "version-check goroutine exit")
+}
+
+func TestRunSecondInterruptForcesStalledReadinessCleanup(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick task"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	interrupts := make(chan os.Signal, 2)
+	dependencies.interrupts = interrupts
+	readinessStarted := make(chan struct{})
+	readinessCancelled := make(chan struct{})
+	dependencies.spawnWithCleanup = func(readinessCtx, cleanupCtx context.Context, _ pisession.Config) (runSession, error) {
+		close(readinessStarted)
+		<-readinessCtx.Done()
+		close(readinessCancelled)
+		<-cleanupCtx.Done()
+		return nil, readinessCtx.Err()
+	}
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "wait"}, log.New(&bytes.Buffer{}), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
+
+	waitRunSignal(t, readinessStarted, "readiness probe")
+	interrupts <- os.Interrupt
+	waitRunSignal(t, readinessCancelled, "readiness cancellation")
+	select {
+	case got := <-finished:
+		t.Fatalf("first interrupt unexpectedly forced readiness cleanup: outcome=%v err=%v", got.outcome, got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	interrupts <- os.Interrupt
+
+	select {
+	case got := <-finished:
+		require.NoError(t, got.err)
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("second interrupt did not force readiness cleanup")
 	}
 }
 
@@ -470,17 +607,54 @@ func TestRunInterruptFinishesPromptHandledWithoutAgentRun(t *testing.T) {
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
 	interrupts := make(chan os.Signal, 2)
-	interrupts <- os.Interrupt
 	dependencies.interrupts = interrupts
+	stateObserved := make(chan struct{})
+	releaseState := make(chan struct{})
+	abortCalled := make(chan struct{})
+	var releaseStateOnce sync.Once
+	releasePostPromptState := func() { releaseStateOnce.Do(func() { close(releaseState) }) }
+	t.Cleanup(releasePostPromptState)
 	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
-		return newScriptedRunSession(cfg, make(chan pisession.Event)), nil
+		session := newScriptedRunSession(cfg, make(chan pisession.Event))
+		stateCalls := 0
+		session.getState = func() (json.RawMessage, error) {
+			stateCalls++
+			if stateCalls == 2 {
+				close(stateObserved)
+				<-releaseState
+			}
+			return session.state, nil
+		}
+		session.abort = func(context.Context) error {
+			close(abortCalled)
+			return nil
+		}
+		return session, nil
 	}
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "/handled"}, log.New(&bytes.Buffer{}), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
 
-	outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "/handled"}, log.New(&bytes.Buffer{}), dependencies)
+	waitRunSignal(t, stateObserved, "post-prompt idle state")
+	interrupts <- os.Interrupt
+	waitRunSignal(t, abortCalled, "abort command")
+	releasePostPromptState()
 
-	require.NoError(t, err)
-	assert.Equal(t, RunInterrupted, outcome)
+	select {
+	case got := <-finished:
+		require.NoError(t, got.err)
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not finish interrupted idle prompt")
+	}
 	registry := readRunRegistry(t, ws.Checkout)
+	require.Len(t, registry.Sessions, 1)
 	for _, record := range registry.Sessions {
 		assert.Equal(t, store.StatusStopped, record.Status)
 		assert.Zero(t, record.PID)
@@ -671,6 +845,27 @@ func TestRunFailsWhenFinalAssistantReportsError(t *testing.T) {
 	}
 }
 
+func TestRunOmitsUnknownSessionFileFromFailureDetails(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+		session := newScriptedRunSession(cfg, make(chan pisession.Event))
+		session.getState = func() (json.RawMessage, error) {
+			return nil, errors.New("state unavailable")
+		}
+		return session, nil
+	}
+	var stderr bytes.Buffer
+
+	outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "wait", Stderr: &stderr}, log.New(&bytes.Buffer{}), dependencies)
+
+	require.ErrorContains(t, err, "state unavailable")
+	assert.Equal(t, RunCompleted, outcome)
+	assert.Contains(t, stderr.String(), "status=stopped")
+	assert.NotContains(t, stderr.String(), "file=")
+}
+
 func TestRunInterruptClosesWithFreshContextAndStopsRegistryRecord(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
@@ -735,7 +930,7 @@ func TestRunInterruptClosesWithFreshContextAndStopsRegistryRecord(t *testing.T) 
 	}
 }
 
-func TestRunFirstInterruptAbortsThroughDurableSettlement(t *testing.T) {
+func TestRunFirstInterruptFinishesOnDurableSettlementWithoutAbortResponse(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
@@ -752,6 +947,10 @@ func TestRunFirstInterruptAbortsThroughDurableSettlement(t *testing.T) {
 		session.abort = func(context.Context) error {
 			close(abortCalled)
 			<-releaseAbort
+			return nil
+		}
+		session.close = func(context.Context) error {
+			close(releaseAbort)
 			return nil
 		}
 		return session, nil
@@ -779,7 +978,6 @@ func TestRunFirstInterruptAbortsThroughDurableSettlement(t *testing.T) {
 	events <- runEvent("message_end", `{"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}`)
 	events <- runEvent("agent_end", `{"type":"agent_end","willRetry":false}`)
 	events <- runEvent("agent_settled", `{"type":"agent_settled"}`)
-	close(releaseAbort)
 
 	select {
 	case got := <-finished:
@@ -794,6 +992,127 @@ func TestRunFirstInterruptAbortsThroughDurableSettlement(t *testing.T) {
 		assert.Equal(t, store.StatusStopped, record.Status)
 		assert.Zero(t, record.PID)
 	}
+}
+
+func TestRunFirstInterruptTimesOutWhenPiNeverSettles(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	dependencies.abortTimeout = 20 * time.Millisecond
+	interrupts := make(chan os.Signal, 2)
+	dependencies.interrupts = interrupts
+	prompted := make(chan struct{})
+	abortCalled := make(chan struct{})
+	releaseAbort := make(chan struct{})
+	closeForced := make(chan bool, 1)
+	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+		session := newScriptedRunSession(cfg, make(chan pisession.Event))
+		session.prompted = prompted
+		session.state = bytes.Replace(session.state, []byte("false"), []byte("true"), 1)
+		session.abort = func(context.Context) error {
+			close(abortCalled)
+			<-releaseAbort
+			return nil
+		}
+		session.close = func(ctx context.Context) error {
+			closeForced <- ctx.Err() != nil
+			close(releaseAbort)
+			return nil
+		}
+		return session, nil
+	}
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "wait"}, log.New(&bytes.Buffer{}), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
+
+	waitRunSignal(t, prompted, "prompt")
+	interrupts <- os.Interrupt
+	waitRunSignal(t, abortCalled, "abort command")
+
+	select {
+	case got := <-finished:
+		require.ErrorContains(t, got.err, "pi did not settle within 20ms after interrupt")
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not enforce the abort watchdog")
+	}
+	assert.False(t, <-closeForced)
+}
+
+func TestRunAbortWatchdogSurvivesContinuousIdleEventDrain(t *testing.T) {
+	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
+	dependencies := defaultRunTestDependencies()
+	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
+	dependencies.abortTimeout = 20 * time.Millisecond
+	interrupts := make(chan os.Signal, 2)
+	dependencies.interrupts = interrupts
+	idleConfirmed := make(chan struct{})
+	releaseIdle := make(chan struct{})
+	var releaseIdleOnce sync.Once
+	releaseIdleState := func() { releaseIdleOnce.Do(func() { close(releaseIdle) }) }
+	t.Cleanup(releaseIdleState)
+	dependencies.onIdleConfirmed = func() {
+		close(idleConfirmed)
+		<-releaseIdle
+	}
+	events := make(chan pisession.Event, 2)
+	floodEvent := runEvent("tool_execution_start", `{"type":"tool_execution_start","toolName":"flood"}`)
+	stderr := newRunEventFeedbackWriter(events, floodEvent, "[tool flood] running")
+	abortCalled := make(chan struct{})
+	releaseAbort := make(chan struct{})
+	closeForced := make(chan bool, 1)
+	var releaseAbortOnce sync.Once
+	releaseAbortCommand := func() { releaseAbortOnce.Do(func() { close(releaseAbort) }) }
+	t.Cleanup(releaseAbortCommand)
+	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
+		session := newScriptedRunSession(cfg, events)
+		session.abort = func(context.Context) error {
+			close(abortCalled)
+			<-releaseAbort
+			return nil
+		}
+		session.close = func(ctx context.Context) error {
+			closeForced <- ctx.Err() != nil
+			releaseAbortCommand()
+			return nil
+		}
+		return session, nil
+	}
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{
+			Type: "quick", Message: "wait", Stderr: stderr,
+		}, log.New(stderr), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
+
+	waitRunSignal(t, idleConfirmed, "confirmed idle state")
+	events <- runEvent("agent_start", `{"type":"agent_start"}`)
+	events <- floodEvent
+	interrupts <- os.Interrupt
+	releaseIdleState()
+	waitRunSignal(t, abortCalled, "abort command")
+
+	select {
+	case got := <-finished:
+		require.ErrorContains(t, got.err, "pi did not settle within 20ms after interrupt")
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		interrupts <- os.Interrupt
+		<-finished
+		t.Fatal("continuous pi events starved the abort watchdog")
+	}
+	assert.False(t, <-closeForced)
 }
 
 func TestRunInterruptUsesSettlementObservedBeforePromptResult(t *testing.T) {
@@ -842,25 +1161,55 @@ func TestRunInterruptUsesSettlementObservedBeforePromptResult(t *testing.T) {
 	}
 }
 
-func TestRunBufferedInterruptWinsImmediatePromptWriteFailure(t *testing.T) {
+func TestRunFirstInterruptCancelsPromptBeforeWrite(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
 	dependencies.getwd = func() (string, error) { return ws.Checkout, nil }
 	interrupts := make(chan os.Signal, 2)
-	interrupts <- os.Interrupt
 	dependencies.interrupts = interrupts
+	promptWriteStarted := make(chan struct{})
+	promptCancelled := make(chan struct{})
+	abortCalled := make(chan struct{}, 1)
 	dependencies.spawn = func(_ context.Context, cfg pisession.Config) (runSession, error) {
 		session := newScriptedRunSession(cfg, make(chan pisession.Event))
-		session.startPrompt = func(context.Context, string, string) (<-chan error, error) {
-			return nil, pisession.ErrCommandTimeout
+		session.startPrompt = func(ctx context.Context, _, _ string) (<-chan error, error) {
+			close(promptWriteStarted)
+			<-ctx.Done()
+			close(promptCancelled)
+			return nil, ctx.Err()
+		}
+		session.abort = func(context.Context) error {
+			abortCalled <- struct{}{}
+			return nil
 		}
 		return session, nil
 	}
+	type result struct {
+		outcome RunOutcome
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "wait"}, log.New(&bytes.Buffer{}), dependencies)
+		finished <- result{outcome: outcome, err: err}
+	}()
 
-	outcome, err := run(context.Background(), RunOptions{Type: "quick", Message: "wait"}, log.New(&bytes.Buffer{}), dependencies)
+	waitRunSignal(t, promptWriteStarted, "blocked prompt write")
+	interrupts <- os.Interrupt
+	waitRunSignal(t, promptCancelled, "prompt cancellation")
 
-	require.ErrorIs(t, err, pisession.ErrCommandTimeout)
-	assert.Equal(t, RunInterrupted, outcome)
+	select {
+	case got := <-finished:
+		require.NoError(t, got.err)
+		assert.Equal(t, RunInterrupted, got.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not stop after cancelling prompt submission")
+	}
+	select {
+	case <-abortCalled:
+		t.Fatal("run sent abort for a prompt that was never submitted")
+	default:
+	}
 }
 
 func TestRunPromptWriteFailureAfterInterruptStaysInterrupted(t *testing.T) {
@@ -1069,6 +1418,24 @@ func TestRunCancellationKeepsInterruptedOutcomeWhenStdoutFinishFails(t *testing.
 	}
 }
 
+func TestClassifyRunErrorKeepsIndependentFailureAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	diagnostic := errors.New("transport failed while cancelling")
+
+	outcome, err := classifyRunError(ctx, errors.Join(ctx.Err(), diagnostic))
+
+	assert.Equal(t, RunInterrupted, outcome)
+	require.ErrorIs(t, err, diagnostic)
+	assert.NotErrorIs(t, err, context.Canceled)
+
+	versionErr := errors.Join(pisession.ErrPiVersionExecution, ctx.Err(), diagnostic)
+	filtered := withoutExpectedErrors(versionErr, ctx.Err(), pisession.ErrPiVersionExecution)
+	require.ErrorIs(t, filtered, diagnostic)
+	assert.NotErrorIs(t, filtered, context.Canceled)
+	assert.NotErrorIs(t, filtered, pisession.ErrPiVersionExecution)
+}
+
 func TestRunBufferedInterruptWinsSelectedEventClosure(t *testing.T) {
 	ws := testws.New(t, testws.WithSessionType("quick", config.SessionType{Description: "Quick"}))
 	dependencies := defaultRunTestDependencies()
@@ -1185,22 +1552,19 @@ func (s *scriptedRunSession) StartPrompt(ctx context.Context, message, image str
 	result := make(chan error, 1)
 	go func() {
 		defer close(result)
-		result <- s.Prompt(ctx, message, image)
+		if s.prompted != nil {
+			close(s.prompted)
+		}
+		if s.onPrompt != nil {
+			s.onPrompt()
+		}
+		if s.prompt != nil {
+			result <- s.prompt(ctx, message, image)
+			return
+		}
+		result <- nil
 	}()
 	return result, nil
-}
-
-func (s *scriptedRunSession) Prompt(ctx context.Context, message, image string) error {
-	if s.prompted != nil {
-		close(s.prompted)
-	}
-	if s.onPrompt != nil {
-		s.onPrompt()
-	}
-	if s.prompt != nil {
-		return s.prompt(ctx, message, image)
-	}
-	return nil
 }
 
 func (s *scriptedRunSession) Abort(ctx context.Context) error {
@@ -1247,6 +1611,23 @@ func newScriptedRunSession(cfg pisession.Config, events chan pisession.Event) *s
 			filepath.Join(cfg.SessionDir, "opaque.jsonl"),
 		)),
 	}
+}
+
+type runEventFeedbackWriter struct {
+	events chan<- pisession.Event
+	event  pisession.Event
+	match  []byte
+}
+
+func newRunEventFeedbackWriter(events chan<- pisession.Event, event pisession.Event, match string) *runEventFeedbackWriter {
+	return &runEventFeedbackWriter{events: events, event: event, match: []byte(match)}
+}
+
+func (w *runEventFeedbackWriter) Write(value []byte) (int, error) {
+	if bytes.Contains(value, w.match) {
+		w.events <- w.event
+	}
+	return len(value), nil
 }
 
 type observedBuffer struct {

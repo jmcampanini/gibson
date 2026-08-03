@@ -58,7 +58,7 @@ func signalProcessIfOwned(owned processRecord, signal syscall.Signal) error {
 	if !exists || current.started != owned.started {
 		return nil
 	}
-	if err := syscall.Kill(owned.pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := syscall.Kill(owned.pid, signal); err != nil && !isProcessDisappearance(err) {
 		return err
 	}
 	return nil

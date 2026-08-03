@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,42 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRegistryReadsReturnCorruptionErrors(t *testing.T) {
+	tests := map[string]string{
+		"malformed JSON": `{"version":1,"sessions":`,
+		"invalid record": `{"version":1,"sessions":{"s-20260726-broken":{"id":"s-20260726-broken","status":"unknown","createdAt":"2026-07-26T14:00:00Z","lastActivityAt":"2026-07-26T14:00:00Z","pid":0}}}`,
+	}
+
+	for name, contents := range tests {
+		t.Run(name, func(t *testing.T) {
+			storage := newTestStore(t)
+			require.NoError(t, os.WriteFile(storage.RegistryPath(), []byte(contents), 0o644))
+
+			record, ok, err := storage.Get("s-20260726-missing")
+			require.Error(t, err)
+			assert.False(t, ok)
+			assert.Zero(t, record)
+
+			records, err := storage.List()
+			require.Error(t, err)
+			assert.Nil(t, records)
+		})
+	}
+}
+
+func TestRegistryReadsTreatMissingStateAsEmpty(t *testing.T) {
+	storage := newTestStore(t)
+
+	record, ok, err := storage.Get("s-20260726-missing")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Zero(t, record)
+
+	records, err := storage.List()
+	require.NoError(t, err)
+	assert.Empty(t, records)
+}
 
 func TestRegistryPersistsVersionedSessionLifecycle(t *testing.T) {
 	storage := newTestStore(t)
@@ -34,7 +71,7 @@ func TestRegistryPersistsVersionedSessionLifecycle(t *testing.T) {
 	require.NoError(t, storage.SetStatus(record.ID, StatusStopped))
 
 	reopened := Open(storage.checkout)
-	got, ok := reopened.Get(record.ID)
+	got, ok := requireGet(t, reopened, record.ID)
 	require.True(t, ok)
 	want := record
 	want.CreatedAt = "2026-07-26T14:00:00Z"
@@ -47,7 +84,7 @@ func TestRegistryPersistsVersionedSessionLifecycle(t *testing.T) {
 
 	require.NoError(t, reopened.SetLive(record.ID, record.PID))
 	require.NoError(t, reopened.SetStatus(record.ID, StatusClosed))
-	closed, ok := reopened.Get(record.ID)
+	closed, ok := requireGet(t, reopened, record.ID)
 	require.True(t, ok)
 	assert.Equal(t, StatusClosed, closed.Status)
 	assert.Zero(t, closed.PID)
@@ -106,7 +143,7 @@ func TestRegistrySerializesConcurrentMutationsWithoutPartialState(t *testing.T) 
 		require.NoError(t, err)
 	}
 
-	records := Open(storage.checkout).List()
+	records := requireList(t, Open(storage.checkout))
 	require.Len(t, records, writers+1)
 	ids := make([]string, len(records))
 	for i, record := range records {
@@ -157,7 +194,7 @@ func TestRegistryEnforcesLifecycleTransitions(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			got, ok := storage.Get(record.ID)
+			got, ok := requireGet(t, storage, record.ID)
 			require.True(t, ok)
 			assert.Equal(t, test.to, got.Status)
 			assert.Equal(t, record.Name, got.Name)
@@ -182,7 +219,7 @@ func TestRegistryEnforcesPIDAndIdentityInvariants(t *testing.T) {
 	stopped := testRecord(2)
 	stopped.Status = StatusStopped
 	require.NoError(t, storage.Put(stopped))
-	got, ok := storage.Get(stopped.ID)
+	got, ok := requireGet(t, storage, stopped.ID)
 	require.True(t, ok)
 	assert.Zero(t, got.PID)
 	require.ErrorContains(t, storage.SetLive(stopped.ID, 0), "pid must be positive")
@@ -201,7 +238,7 @@ func TestStopIfLivePIDCannotStopAnotherOwner(t *testing.T) {
 	stopped, err := storage.StopIfLivePID(record.ID, record.PID+1)
 	require.NoError(t, err)
 	assert.False(t, stopped)
-	got, ok := storage.Get(record.ID)
+	got, ok := requireGet(t, storage, record.ID)
 	require.True(t, ok)
 	assert.Equal(t, StatusLive, got.Status)
 	assert.Equal(t, record.PID, got.PID)
@@ -209,7 +246,7 @@ func TestStopIfLivePIDCannotStopAnotherOwner(t *testing.T) {
 	stopped, err = storage.StopIfLivePID(record.ID, record.PID)
 	require.NoError(t, err)
 	assert.True(t, stopped)
-	got, ok = storage.Get(record.ID)
+	got, ok = requireGet(t, storage, record.ID)
 	require.True(t, ok)
 	assert.Equal(t, StatusStopped, got.Status)
 	assert.Zero(t, got.PID)
@@ -228,7 +265,7 @@ func TestRegistryIgnoresLeftoverTemporaryFilesAndNormalizesMode(t *testing.T) {
 	info, err := os.Stat(storage.RegistryPath())
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
-	assert.Len(t, storage.List(), 2)
+	assert.Len(t, requireList(t, storage), 2)
 }
 
 func TestRegistryLocksAcrossProcessesAndReloadsBeforeMutation(t *testing.T) {
@@ -237,7 +274,7 @@ func TestRegistryLocksAcrossProcessesAndReloadsBeforeMutation(t *testing.T) {
 	release := make(chan struct{})
 	parentDone := make(chan error, 1)
 	go func() {
-		_, err := storage.CreateSession(func(id string) (SessionCreation, error) {
+		_, err := storage.CreateSession(context.Background(), func(id string) (SessionCreation, error) {
 			close(entered)
 			<-release
 			record := testRecord(1)
@@ -259,7 +296,70 @@ func TestRegistryLocksAcrossProcessesAndReloadsBeforeMutation(t *testing.T) {
 	require.NoError(t, <-parentDone)
 	require.NoError(t, child.Wait())
 	assert.FileExists(t, donePath)
-	assert.Len(t, storage.List(), 2)
+	assert.Len(t, requireList(t, storage), 2)
+}
+
+func TestCreateSessionLockAcquisitionHonorsCancellation(t *testing.T) {
+	tests := map[string]func(*testing.T, *Store) func(){
+		"process lock": func(t *testing.T, storage *Store) func() {
+			lock := checkoutLock(storage.gibsonDir())
+			require.NoError(t, lock.lock(context.Background()))
+			return lock.unlock
+		},
+		"directory lock": func(t *testing.T, storage *Store) func() {
+			lock, err := lockDirectory(context.Background(), storage.gibsonDir())
+			require.NoError(t, err)
+			return func() { require.NoError(t, lock.close()) }
+		},
+	}
+
+	for name, holdLock := range tests {
+		t.Run(name, func(t *testing.T) {
+			storage := newTestStore(t)
+			release := sync.OnceFunc(holdLock(t, storage))
+			t.Cleanup(release)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			started := make(chan struct{})
+			callbackCalled := make(chan struct{}, 1)
+			result := make(chan error, 1)
+			go func() {
+				close(started)
+				_, err := storage.CreateSession(ctx, func(id string) (SessionCreation, error) {
+					callbackCalled <- struct{}{}
+					record := testRecord(1)
+					record.ID = id
+					return SessionCreation{Record: record, Rollback: func() error { return nil }}, nil
+				})
+				result <- err
+			}()
+			<-started
+
+			require.Never(t, func() bool {
+				select {
+				case <-result:
+					return true
+				default:
+					return false
+				}
+			}, 50*time.Millisecond, time.Millisecond)
+			cancel()
+
+			select {
+			case err := <-result:
+				require.ErrorIs(t, err, context.Canceled)
+			case <-time.After(time.Second):
+				t.Fatal("CreateSession did not return after cancellation")
+			}
+
+			release()
+			select {
+			case <-callbackCalled:
+				t.Fatal("CreateSession callback ran after the canceled call returned")
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+	}
 }
 
 func TestCreateSessionWriteFailureKeepsProcessLockThroughRollback(t *testing.T) {
@@ -277,7 +377,7 @@ func TestCreateSessionWriteFailureKeepsProcessLockThroughRollback(t *testing.T) 
 	releaseRollback := make(chan struct{})
 	createDone := make(chan error, 1)
 	go func() {
-		_, err := storage.CreateSession(func(id string) (SessionCreation, error) {
+		_, err := storage.CreateSession(context.Background(), func(id string) (SessionCreation, error) {
 			record := testRecord(1)
 			record.ID = id
 			return SessionCreation{
@@ -304,7 +404,7 @@ func TestCreateSessionWriteFailureKeepsProcessLockThroughRollback(t *testing.T) 
 	require.ErrorIs(t, <-createDone, writeFailure)
 	require.NoError(t, child.Wait())
 	assert.FileExists(t, donePath)
-	records := storage.List()
+	records := requireList(t, storage)
 	require.Len(t, records, 2)
 	assert.Contains(t, []Status{records[0].Status, records[1].Status}, StatusStopped)
 }
@@ -344,6 +444,20 @@ func TestRegistryMutationHelper(t *testing.T) {
 	record := testRecord(2)
 	require.NoError(t, storage.Put(record))
 	require.NoError(t, os.WriteFile(os.Getenv("GIBSON_TEST_REGISTRY_DONE"), []byte("done"), 0o600))
+}
+
+func requireGet(t *testing.T, storage *Store, id string) (Record, bool) {
+	t.Helper()
+	record, ok, err := storage.Get(id)
+	require.NoError(t, err)
+	return record, ok
+}
+
+func requireList(t *testing.T, storage *Store) []Record {
+	t.Helper()
+	records, err := storage.List()
+	require.NoError(t, err)
+	return records
 }
 
 func newTestStore(t *testing.T) *Store {
