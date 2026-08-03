@@ -1,6 +1,6 @@
 # MILESTONE_CONVENTIONS
 
-Binding conventions for the remaining milestone plans (`MILESTONE_1.md` …
+Binding conventions for the remaining milestone plans (`MILESTONE_2.md` …
 `MILESTONE_7.md`), including the seams established by the current implementation.
 [PROCESS.md](PROCESS.md) governs plan authority, activation, execution, consolidation, and
 retirement. SPEC.md is normative for behavior; this file pins every cross-milestone seam

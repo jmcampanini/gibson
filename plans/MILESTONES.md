@@ -5,8 +5,7 @@ capability you can actually use, proven by an agent-verified workflow. Later mil
 stack on earlier ones; nothing is built speculatively for a later slice.
 
 [PROCESS.md](PROCESS.md) governs activation, execution, consolidation, and retirement.
-M0 is complete, M1 is active, and M2–M7 are provisional forecasts until their plan-gate
-reviews.
+M0 and M1 are complete; M2–M7 are provisional forecasts until their plan-gate reviews.
 
 ## Principles behind this slicing
 
@@ -33,25 +32,17 @@ reviews.
 
 ## M1 — Headless session core (pi over RPC, no HTTP)
 
-**Status: active.**
+**Status: complete** (2026-08-03).
 
 **You can now:** run `gibson run <type> "<prompt>"` in a checkout — a one-shot pi run
 honoring your session-type config, with the session stored in `.gibson/sessions/`.
 
-Scope: the `pisession` package — spawn `pi --mode rpc --session-id <id> --session-dir <dir>`
-with flags assembled from the session type (model/thinking/`extra_args`); LF-only JSONL
-framing (SPEC §6); command/response correlation; event subscription; prompt, abort, clean
-shutdown; stderr capture to `.gibson/logs/`; session registry file in `.gibson/`.
-`internal/app` owns the one-shot workflow; a thin `run` Cobra adapter prints streamed
-text.
-
-Why now: this is the single riskiest seam, isolated from everything else. The `run`
-command is also a permanently useful debugging tool.
-
-Proof: Go integration test + agent workflow: `gibson run` a prompt in a scratch checkout,
-verify streamed output, `agent_end`, a session JSONL in `.gibson/sessions/`, a registry
-entry, that abort mid-stream terminates cleanly, and that `git status --porcelain` stays
-empty after the `.gibson/` artifacts are created.
+Delivered across eight chunks: the `pisession` RPC core (LF-only framing, command
+correlation, process lifecycle and descendant ownership), `.gibson/` storage with the
+locked `state.json` registry, and the `gibson run` one-shot CLI with durable
+interrupt, crash, hostile-record, and named-checkout semantics. Proven by the
+agent-verified end-to-end workflow against real pi plus the compiled-binary CLI proof
+inside `make verify`; the fakepi/pitest/testws test bed carries forward to M2–M7.
 
 ## M2 — Curl-drivable HTTP API
 
