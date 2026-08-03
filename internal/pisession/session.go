@@ -214,12 +214,12 @@ func (s *Session) StartPrompt(ctx context.Context, message, behavior string) (<-
 }
 
 func (s *Session) Abort(ctx context.Context) error {
-	_, err := s.rpc.commandWithPolicy(ctx, "abort", nil, boundedResponseWait)
+	_, err := s.rpc.command(ctx, "abort", nil)
 	return err
 }
 
 func (s *Session) GetState(ctx context.Context) (json.RawMessage, error) {
-	return s.rpc.commandWithPolicy(ctx, "get_state", nil, boundedResponseWait)
+	return s.rpc.command(ctx, "get_state", nil)
 }
 
 func (s *Session) GetEntries(ctx context.Context, since string) ([]json.RawMessage, string, error) {
@@ -227,7 +227,7 @@ func (s *Session) GetEntries(ctx context.Context, since string) ([]json.RawMessa
 	if since != "" {
 		fields = map[string]any{"since": since}
 	}
-	data, err := s.rpc.commandWithPolicy(ctx, "get_entries", fields, boundedResponseWait)
+	data, err := s.rpc.command(ctx, "get_entries", fields)
 	if err != nil {
 		var commandErr *commandError
 		if since != "" && errors.As(err, &commandErr) {
@@ -251,11 +251,11 @@ func (s *Session) GetEntries(ctx context.Context, since string) ([]json.RawMessa
 }
 
 func (s *Session) GetSessionStats(ctx context.Context) (json.RawMessage, error) {
-	return s.rpc.commandWithPolicy(ctx, "get_session_stats", nil, boundedResponseWait)
+	return s.rpc.command(ctx, "get_session_stats", nil)
 }
 
 func (s *Session) SetSessionName(ctx context.Context, name string) error {
-	_, err := s.rpc.commandWithPolicy(ctx, "set_session_name", map[string]any{"name": name}, boundedResponseWait)
+	_, err := s.rpc.command(ctx, "set_session_name", map[string]any{"name": name})
 	return err
 }
 
