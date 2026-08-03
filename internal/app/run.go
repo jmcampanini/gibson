@@ -52,14 +52,14 @@ type runSession interface {
 }
 
 type runDependencies struct {
-	getwd            func() (string, error)
-	resolvePiBin     func(string) (string, error)
-	checkPiVersion   func(context.Context, string) (pisession.VersionResult, error)
-	spawn            func(readinessCtx, cleanupCtx context.Context, cfg pisession.Config) (runSession, error)
-	now              func() time.Time
-	interrupts       <-chan os.Signal
-	abortTimeout     time.Duration
-	onIdleConfirmed  func()
+	getwd           func() (string, error)
+	resolvePiBin    func(string) (string, error)
+	checkPiVersion  func(context.Context, string) (pisession.VersionResult, error)
+	spawn           func(readinessCtx, cleanupCtx context.Context, cfg pisession.Config) (runSession, error)
+	now             func() time.Time
+	interrupts      <-chan os.Signal
+	abortTimeout    time.Duration
+	onIdleConfirmed func()
 }
 
 type runStartupControl struct {
