@@ -275,7 +275,7 @@ needs it; do not add speculative implementations solely for a later plan.
 
 ## 8. Frontend conventions (SPEC §8)
 
-- `web/`: Vite + React 18 + TypeScript, `src/` layout:
+- `web/`: Vite + React 19 + TypeScript, `src/` layout:
   - `src/api/types.ts` — hand-written TS mirrors of the wire types in §3/§4 (single
     source: this file's tables).
   - `src/api/client.ts` — typed fetch wrappers, one function per route
