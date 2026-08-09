@@ -1,4 +1,4 @@
-.PHONY: help dev-web dev-server web build test cli-proof lint lint-fix fmt fmt-check tidy tidy-check check verify clean
+.PHONY: help dev-web dev-server web build test cli-proof lint lint-fix fmt fmt-check tidy tidy-check vuln check clean
 
 BUILD_DIR        := build
 BINARY           := $(BUILD_DIR)/gibson
@@ -66,9 +66,10 @@ tidy-check: ## Fail if go mod tidy would change dependency metadata.
 	if [ -n "$$out" ]; then echo "$$out"; echo "go mod tidy would change go.mod/go.sum"; exit 1; fi; \
 	echo "go mod tidy failed (rc=$$rc)"; exit $$rc
 
-check: fmt-check tidy-check lint test ## Run all non-mutating checks.
+vuln: ## Scan Go code for known vulnerabilities.
+	go tool govulncheck $(PKG)
 
-verify: check cli-proof ## Run the complete local and CI verification gate.
+check: fmt-check tidy-check lint test vuln ## Run all non-mutating checks.
 
 clean: ## Remove build artifacts, coverage files, and test cache.
 	rm -rf $(BUILD_DIR) $(WEB_DIR)/dist coverage.out coverage.html *.coverprofile

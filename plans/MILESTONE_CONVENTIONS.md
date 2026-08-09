@@ -14,7 +14,7 @@ All plans MUST use the names, paths, and shapes here verbatim — no local varia
 
 ## 1. Module, layout, CLI, libraries
 
-- **Module path:** `github.com/jmcampanini/gibson`. Go 1.26. `main.go` is the thin process
+- **Module path:** `github.com/jmcampanini/gibson`. Go 1.26.5. `main.go` is the thin process
   boundary at the repository root. The canonical binary output is `build/gibson`.
 - **Directory / package layout** (one-line responsibility each):
   - `cmd/` — thin Cobra adapters, one file per command + `_test.go` sibling: `root.go`,

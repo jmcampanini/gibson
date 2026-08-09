@@ -172,6 +172,6 @@ A milestone exits only when all of these gates, plus its own specific exit crite
 - [ ] Review-derived guardrails were codified in the repository.
 - [ ] The completed milestone file and root `PLAN.md` were deleted, and the roadmap and
       document links were checked.
-- [ ] `make verify` is green on the consolidated milestone branch and the final pull
-      request's CI is green.
+- [ ] `make check` and `make cli-proof` are green on the consolidated milestone branch,
+      and the final pull request's CI is green.
 - [ ] The consolidated milestone pull request was reviewed and squash-merged into `main`.
