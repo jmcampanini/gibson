@@ -66,8 +66,8 @@ tidy-check: ## Fail if go mod tidy would change dependency metadata.
 	if [ -n "$$out" ]; then echo "$$out"; echo "go mod tidy would change go.mod/go.sum"; exit 1; fi; \
 	echo "go mod tidy failed (rc=$$rc)"; exit $$rc
 
-vuln: ## Scan Go code for known vulnerabilities.
-	go tool govulncheck $(PKG)
+vuln: ## Check dependencies and reachable code for known vulnerabilities.
+	go tool govulncheck ./...
 
 check: fmt-check tidy-check lint test vuln ## Run all non-mutating checks.
 
