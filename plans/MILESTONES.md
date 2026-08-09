@@ -42,7 +42,7 @@ correlation, process lifecycle and descendant ownership), `.gibson/` storage wit
 locked `state.json` registry, and the `gibson run` one-shot CLI with durable
 interrupt, crash, hostile-record, and named-checkout semantics. Proven by the
 agent-verified end-to-end workflow against real pi plus the compiled-binary CLI proof
-inside `make verify`; the fakepi/pitest/testws test bed carries forward to M2–M7.
+through `make cli-proof`; the fakepi/pitest/testws test bed carries forward to M2–M7.
 
 ## M2 — Curl-drivable HTTP API
 

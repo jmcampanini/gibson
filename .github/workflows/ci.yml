@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  check:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
@@ -39,5 +39,8 @@ jobs:
           version: v2.12.2
           install-only: true
 
-      - name: Verify
-        run: make verify
+      - name: Check
+        run: make check
+
+      - name: CLI proof
+        run: make cli-proof

@@ -227,7 +227,7 @@ SPEC.md. Outline (binding for the implementer; prose is theirs):
 1. **What gibson is** — one paragraph: Go binary, localhost web UI for pi sessions,
    one server per grove-style workspace; browser tabs are disposable viewers.
 2. **Requirements** — pi 0.82.0 or newer on `$PATH` (or `pi_bin`), git, a grove-style
-   workspace; for building from source: Go 1.26 + Node.
+   workspace; for building from source: Go 1.26.5 + Node.
 3. **Install** — build from source with `cd web && npm ci`, then `make build`; the
    canonical artifact is `build/gibson` with the SPA embedded via `go:embed`. Note that
    `go install` only works from a tree with `web/dist` built.
