@@ -1,7 +1,7 @@
 # MILESTONE_CONVENTIONS
 
-Binding conventions for the remaining milestone plans (`MILESTONE_2.md` …
-`MILESTONE_7.md`), including the seams established by the current implementation.
+Binding conventions for the remaining milestone plans (`MILESTONE_N1.md` …
+`MILESTONE_N3.md`), including the seams established by the current implementation.
 [PROCESS.md](PROCESS.md) governs plan authority, activation, execution, consolidation, and
 retirement. SPEC.md is normative for behavior; this file pins every cross-milestone seam
 SPEC.md left open so independently written plans compose. Where this file and SPEC.md
@@ -44,7 +44,9 @@ All plans MUST use the names, paths, and shapes here verbatim — no local varia
 - **CLI tree:** `gibson serve [--port N] [--dev]` (the server; `--dev` reverse-proxies
   non-`/api` paths to the Vite dev server at `http://localhost:5173` — single origin, no
   CORS); `gibson run <type> <message> [--checkout <name>]` (M1 one-shot, prints streamed
-  text, defaults to the launch checkout). Cobra uses `SilenceErrors`/`SilenceUsage` and
+  text, defaults to the launch checkout); `gibson new <type> [--name <name>]` (N1:
+  mint worktree, exec interactive pi TUI, SPEC §5.5); `gibson list` and
+  `gibson open <id>` (N3). Cobra uses `SilenceErrors`/`SilenceUsage` and
   ldflags version injection. Every command remains an adapter to an `internal/app`
   workflow.
 - **Libraries (pinned):** `spf13/cobra` (CLI), `BurntSushi/toml` directly (single file, no
@@ -83,7 +85,7 @@ pi's `extension_ui_request` uuid.
 | `GET /api/config/session-types` | — | `{"sessionTypes":[{"name","description","model","thinking"}]}` (model/thinking `null` when unset) |
 | `GET /api/checkouts` | — | `{"checkouts":[{"name","path","branch","isPrimary"}]}` — `name` = directory basename, unique key |
 | `GET /api/sessions` | — | `{"sessions":[SessionSummary]}` |
-| `POST /api/sessions` | `{"type","checkout","name"?,"message"}` | 201 `{"session":SessionSummary}` |
+| `POST /api/sessions` | `{"type","name"?,"message"}` — gibson mints the worktree (SPEC §2.2) | 201 `{"session":SessionSummary}` |
 | `GET /api/sessions/{id}/history` | — | `{"session":SessionSummary,"entries":[<pi entry verbatim>],"leafId":string\|null,"cursor":string\|null,"pendingDialog":<request verbatim>\|null,"uiState":{"statuses":{key:text},"widgets":{key:[lines]},"title":string\|null}}` |
 | `POST /api/sessions/{id}/message` | `{"message","behavior"?:"steer"\|"followUp"}` | `{"session":SessionSummary}` |
 | `POST /api/sessions/{id}/abort` | `{}` | `{"session":SessionSummary}` |
@@ -95,9 +97,11 @@ pi's `extension_ui_request` uuid.
 `SessionSummary` = `{"id","name","type","checkout","status","createdAt","lastActivityAt"}`.
 
 **Wire status enum** (SPEC §7.1 literally): `"idle" | "streaming" | "blocked-on-dialog" |
-"stopped" | "closed"`. Derivation from registry status (§5): `live` + pending dialog →
-`blocked-on-dialog`; `live` + streaming flag → `streaming`; `live` otherwise → `idle`;
-`stopped`/`closed` pass through. A registry `live` entry with **no live in-memory
+"tui-live" | "stopped" | "closed"`. Derivation from registry status + owner (§5):
+owner `server` + `live` + pending dialog → `blocked-on-dialog`; + streaming flag →
+`streaming`; otherwise → `idle`. Owner `tui` + `live` → `tui-live` when the diagnostic
+pid is alive, else `stopped` (and any process observing the dead pid may repair the
+record). A `server` registry `live` entry with **no live in-memory
 process** derives as wire `stopped` wherever it is read (list, history, resume) — the
 derivation never reports `idle` for a process gibson does not hold. Streaming flag: set on pi `agent_start`, cleared on
 `agent_settled` (fall back to `agent_end` if settled never arrives). `lastActivityAt`
@@ -184,12 +188,13 @@ algorithm is the entire recovery story; there is no other replay mechanism.
 
 ## 5. `.gibson/` storage and the registry
 
-Layout, exactly SPEC §4.1:
+Layout, exactly SPEC §4.1 — central, in the launch checkout, regardless of where
+sessions run:
 
 ```
-<checkout>/.gibson/
+<launch-checkout>/.gibson/
 ├── sessions/                     # passed to pi as --session-dir
-├── state.json                    # per-checkout registry (below)
+├── state.json                    # workspace-wide registry (below)
 └── logs/<session-id>.stderr.log
 ```
 
@@ -197,8 +202,8 @@ Every checkout MUST contain a committed `.gitignore` entry for `.gibson/`. Every
 that creates `.gibson/` data MUST run `git status --porcelain` in the checkout and require
 empty output.
 
-**`state.json` schema** (checkout is implicit — the registry lives in it; no checkout
-field, so nothing goes stale on rename):
+**`state.json` schema** (no absolute paths anywhere — SPEC §4.1.4; `checkout` is the
+worktree directory basename, `owner` per SPEC §5.5):
 
 ```json
 {
@@ -208,7 +213,9 @@ field, so nothing goes stale on rename):
       "id": "s-20260726-k3v9qx",
       "name": "Refactor auth",
       "type": "review",
+      "owner": "server",
       "status": "live",
+      "checkout": "wt-refactor-auth",
       "createdAt": "2026-07-26T14:00:00Z",
       "lastActivityAt": "2026-07-26T14:05:00Z",
       "pid": 12345
@@ -220,21 +227,24 @@ field, so nothing goes stale on rename):
 - **Registry status enum:** `"live" | "stopped" | "closed"` (SPEC §4.1.1). Wire statuses
   `idle`/`streaming`/`blocked-on-dialog` are derived in-memory, never persisted.
 - `pid` is diagnostic only — recorded at spawn, zeroed on exit, **never** used to
-  re-attach (SPEC §5.3.2). Startup sweep: any `live` entry → `stopped`, pid zeroed.
+  re-attach (SPEC §5.3.2); for TUI-owned records it additionally feeds the liveness
+  check in §3's status derivation. Server startup sweep: any `live` entry with owner
+  `server` → `stopped`, pid zeroed; owner `tui` entries are swept only when their
+  diagnostic pid is dead.
 - **Session id format:** `s-<YYYYMMDD>-<6 chars of [a-z0-9] via crypto/rand>`
   (e.g. `s-20260726-k3v9qx`). Matches pi's id regex; date prefix makes ids scannable.
   Regenerate on collision against registry + `sessions/` contents. Gibson session id
   **is** the pi session id — one id, passed via `--session-id`.
 - Writes: process-local serialization plus an advisory cross-process lock on the stable
-  per-checkout `.gibson/` directory itself; no lock file is created. Every read-modify-write mutation reloads the latest `state.json` while holding the lock and
+  central `.gibson/` directory itself; no lock file is created. Every read-modify-write mutation reloads the latest `state.json` while holding the lock and
   completes its write-temp-then-rename replacement before unlocking. Readers therefore
   see either the previous complete file or the next complete file, while concurrent
-  `gibson run` invocations—or a run overlapping the workspace server—cannot lose one
-  another's updates. One server still governs each workspace, but it is not the only
-  process that may mutate a checkout registry.
+  `gibson new`/`gibson run` invocations—or either overlapping the workspace server—cannot
+  lose one another's updates. One server still governs each workspace, but it is not the
+  only process that may mutate the registry.
 - Fresh-session allocation holds that same lock from registry/header collision scanning
   through pi readiness and the first live-record replacement. Startup is serialized only
-  within one checkout and creates no reservation artifact. A failed live replacement stops
+  within the workspace's central registry and creates no reservation artifact. A failed live replacement stops
   the spawned process through its creation rollback before unlocking, then reconciles any
   possibly committed record to stopped. Later ambiguous cleanup may stop only a live record
   whose diagnostic pid matches the process being cleaned up.
@@ -253,12 +263,14 @@ field, so nothing goes stale on rename):
 ## 6. pi process contract (SPEC §5–6)
 
 - **Argv assembly**, exact order:
-  `<pi_bin> --mode rpc --session-id <id> --session-dir <checkout>/.gibson/sessions`
+  `<pi_bin> --mode rpc --session-id <id> --session-dir <launch-checkout>/.gibson/sessions`
   + `--model <model>` (if set) + `--thinking <thinking>` (if set) + `extra_args...`
-  verbatim, last, unparsed. cwd = the target checkout. Environment inherited.
-  `pi_bin` from config, else `exec.LookPath("pi")`.
-- **stderr** → appended to `<checkout>/.gibson/logs/<session-id>.stderr.log`
-  (dirs 0755, file 0644, created at spawn).
+  verbatim, last, unparsed. cwd = the session's minted worktree. Environment inherited.
+  `pi_bin` from config, else `exec.LookPath("pi")`. TUI-owned sessions (SPEC §5.5) use
+  the identical assembly **without** `--mode rpc`.
+- **stderr** → appended to `<launch-checkout>/.gibson/logs/<session-id>.stderr.log`
+  (dirs 0755, file 0644, created at spawn). TUI-owned sessions keep stderr on the
+  terminal.
 - **Framing:** read stdout with `bufio.Reader.ReadBytes('\n')` (no Scanner — its 64KB
   default line cap breaks large entries); strip one trailing `\r`; split on `\n` ONLY
   (SPEC §6.1.2). Write commands as one JSON object + `\n`. All writes through a single
@@ -295,7 +307,7 @@ field, so nothing goes stale on rename):
   (user close) or `stopped` (server shutdown). Unexpected pi exit: registry → `stopped`,
   emit `status`, and log the stderr tail at error level.
 - **Version compatibility:** at startup run `pi --version`. The minimum is 0.82.0 and
-  the 0.82.x line is verified. Versions below the minimum fail with an error naming the
+  the 0.84.x line is verified. Versions below the minimum fail with an error naming the
   found and minimum versions; later minor or major versions are accepted and produce an unverified-line
   warning through the injected logger (SPEC §5.4). Constants live in
   `internal/pisession/version.go`.
@@ -400,7 +412,8 @@ confidence unavailable below, rather than duplicating lower-layer assertion matr
   `.gibson/` ignored). Every proof that writes `.gibson/` artifacts requires an empty
   `git status --porcelain`. The dialog-exercising extension fixture is `test/fixtures/extensions/confirm-gate.ts`
   (calls `ctx.ui.confirm()` before tool execution) — referenced from test
-  `gibson.toml` via `extra_args = ["-e", "<abs path>"]`; used by M5 and M7 (SPEC §9.5).
+  `gibson.toml` via `extra_args = ["-e", "<abs path>"]`; used by N2 and the §9.5
+  horizon workflow.
 - Test style: testify `require`/`assert`, table tests, `_test.go` next to code
   (grove-cli idiom). No mocking frameworks; fakes and real subprocesses only.
 

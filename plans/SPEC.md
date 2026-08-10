@@ -10,13 +10,13 @@ Gibson is a Go CLI that runs a localhost web server for driving [pi](https://git
 
 A single Go binary that:
 
-1. Runs from inside a checkout of a git repository.
-2. Serves an embedded React single-page application over HTTP.
-3. Spawns and supervises `pi --mode rpc` subprocesses — one per live agent session.
-4. Fans out pi's event stream to any number of connected browser clients via SSE.
+1. Runs from inside a checkout of a git repository (typically `main/`).
+2. Mints a fresh sibling worktree for every new session (§2.2) and launches pi there — either the interactive pi TUI from the CLI (`gibson new`, §5.5) or a supervised `pi --mode rpc` subprocess owned by the server.
+3. Serves an embedded React single-page application over HTTP.
+4. Fans out pi's event stream to connected browser clients via SSE.
 5. Accepts actions (send prompt, abort, answer dialog, …) via REST.
 
-The server owns sessions; browser tabs are disposable viewers. A session outlives every tab and survives server restarts (§6.4).
+Whoever spawned a session's pi process owns it while it lives (§5.1.3, §5.5). Session data is central (§4) and outlives worktrees, browser tabs, and server restarts.
 
 ### 1.2 Non-goals for v1
 
@@ -58,10 +58,13 @@ Gibson targets a grove-style workspace (as managed by grove-cli):
 - 2.1.3 Gibson MUST derive the **workspace root** as the parent directory of that checkout.
 - 2.1.4 One gibson server instance governs exactly one workspace (all sibling checkouts of that repo).
 
-### 2.2 Checkout discovery
+### 2.2 Worktree minting and enumeration
 
-- 2.2.1 Gibson MUST enumerate available checkouts itself (via `git worktree list` from the launch checkout), not from config.
-- 2.2.2 The target checkout for a session is chosen **at launch time** in the UI, orthogonally to the session type. Session-type config MUST NOT pin a checkout.
+- 2.2.1 Every new managed session (`gibson new`, web launch) mints a fresh sibling worktree; the launch flow never offers an existing checkout in v1. (M1's one-shot `gibson run` keeps its shipped checkout-targeting behavior.) Session type and worktree remain orthogonal: config defines *how* to run pi, minting defines *where*. Session-type config MUST NOT pin a checkout.
+- 2.2.2 The base of a minted worktree is **latest**: fetch the remote default branch and branch from its head; fall back to the local default-branch head when offline or remote-less.
+- 2.2.3 Minting is native git (`git worktree add ../wt-<slug> -b <slug>`), following grove-cli's visible conventions (a `wt-`-prefixed sibling directory). Gibson MUST NOT require the grove binary at runtime. The slug derives from the session name (or the generated session id when unnamed), deduplicated on collision.
+- 2.2.4 Gibson MUST still enumerate existing checkouts itself (via `git worktree list` from the launch checkout) for listing and display, never from config.
+- 2.2.5 Worktree cleanup is not gibson's job in v1 (`grove prune` / `git worktree remove`); session data survives pruning (§4.1.3).
 
 ---
 
@@ -101,24 +104,24 @@ description = "Quick one-off task"
 
 ---
 
-## 4. Storage — per-checkout `.gibson/`
+## 4. Storage — central `.gibson/` in the launch checkout
 
 ### 4.1 Layout
 
-All session data lives inside the checkout the session runs in:
+All session data lives in one place — the checkout gibson is launched from (typically `main/`) — regardless of which worktree a session runs in:
 
 ```
-<checkout>/.gibson/
+<launch-checkout>/.gibson/
 ├── sessions/        # passed to pi as --session-dir; pi's JSONL session files
-├── state.json       # gibson's session registry for this checkout
+├── state.json       # gibson's session registry for the whole workspace
 └── logs/
     └── <session-id>.stderr.log
 ```
 
-- 4.1.1 Pi session JSONL files are the ground truth for conversation content. `state.json` holds only gibson-owned metadata per session: gibson session id, display name, session type name, status (`live` | `stopped` | `closed`), created-at, last-activity.
+- 4.1.1 Pi session JSONL files are the ground truth for conversation content. `state.json` holds only gibson-owned metadata per session: gibson session id, display name, session type name, owner (`server` | `tui`), status (`live` | `stopped` | `closed`), checkout (worktree directory basename), created-at, last-activity.
 - 4.1.2 The registry MUST be rebuildable: if `state.json` is lost, gibson SHOULD still list the sessions found in `sessions/` (with degraded metadata).
-- 4.1.3 A session is fully self-contained with its worktree: deleting/pruning the worktree deletes its sessions. This is intended behavior.
-- 4.1.4 "List all sessions" = enumerate checkouts (§2.2.1), scan each checkout's `.gibson/`. There is no workspace-level registry.
+- 4.1.3 Sessions outlive their worktrees: pruning a minted worktree MUST NOT touch the transcript, registry entry, or logs. Worktrees are ephemeral; conversations are not.
+- 4.1.4 The registry MUST NOT persist absolute paths, and the storage root MUST be derived at exactly one code seam — relocating storage later is a config change plus `mv`, never a data migration.
 
 ### 4.2 Git hygiene
 
@@ -130,11 +133,11 @@ All session data lives inside the checkout the session runs in:
 
 ### 5.1 One subprocess per live session
 
-- 5.1.1 A live session is backed by exactly one subprocess:
-  `pi --mode rpc --session-id <id> --session-dir <checkout>/.gibson/sessions [--model …] [--thinking …] [extra_args…]`
-  spawned with the target checkout as its working directory.
+- 5.1.1 A live server-owned session is backed by exactly one subprocess:
+  `pi --mode rpc --session-id <id> --session-dir <launch-checkout>/.gibson/sessions [--model …] [--thinking …] [extra_args…]`
+  spawned with the session's minted worktree as its working directory.
 - 5.1.2 Gibson assigns the session id (it MUST match pi's id rules: `^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`).
-- 5.1.3 **Single-writer rule:** pi does no session-file locking. Gibson's subprocess MUST be the only writer to a session's file. Gibson MUST NOT spawn two processes for the same session id.
+- 5.1.3 **Single-writer rule:** pi does no session-file locking. Exactly one process may write a session's file, whoever owns it — the server's RPC subprocess or a TUI-owned pi (§5.5). Gibson MUST NOT spawn a process for any session whose registry record is `live`.
 - 5.1.4 Pi stderr MUST be captured to `logs/<session-id>.stderr.log`.
 
 ### 5.2 Lifetime
@@ -151,7 +154,13 @@ All session data lives inside the checkout the session runs in:
 
 ### 5.4 Pi binary compatibility
 
-- 5.4.1 Gibson v1 requires **pi 0.82.0 or newer** and MUST check `pi --version` at startup. The 0.82.x line is verified. Versions below 0.82.0 MUST fail with a clear error naming the found and minimum versions; later minor or major versions MUST be allowed to start with a warning that they are not yet verified. The pi ecosystem has a history of breaking renames, so version drift MUST remain visible.
+- 5.4.1 Gibson v1 requires **pi 0.82.0 or newer** and MUST check `pi --version` at startup. The 0.84.x line is verified. Versions below 0.82.0 MUST fail with a clear error naming the found and minimum versions; later minor or major versions MUST be allowed to start with a warning that they are not yet verified. The pi ecosystem has a history of breaking renames, so version drift MUST remain visible.
+
+### 5.5 TUI-owned sessions
+
+- 5.5.1 `gibson new <type> [--name <name>]` mints a worktree (§2.2), registers the session (`owner: "tui"`, status `live`), and execs the **interactive pi TUI** (no `--mode rpc`) with gibson's `--session-id` and the central `--session-dir`, cwd = the minted worktree. When the TUI exits, the record becomes `stopped`.
+- 5.5.2 While a TUI-owned session is `live`, its pi process is the session's single writer. The server MUST NOT spawn a process for it and MUST treat it as read-only: listed, and readable via its session file (§7.1).
+- 5.5.3 Once `stopped`, ownership is unfixed: the server may resume the session over RPC (§5.3.3), and `gibson open` may resume it in the TUI — never both at once (§5.1.3).
 
 ---
 
@@ -216,8 +225,8 @@ The server exposes a JSON REST API plus one SSE stream per session. Exact paths 
 |---|---|
 | `GET /api/config/session-types` | Session types from `gibson.toml` (name, description, model, thinking). |
 | `GET /api/checkouts` | Enumerated checkouts of the workspace. |
-| `GET /api/sessions` | All sessions across all checkouts: id, name, type, checkout, status (`idle` / `streaming` / `blocked-on-dialog` / `stopped` / `closed`), last activity. |
-| `POST /api/sessions` | Create: `{type, checkout, name?, message}`. Spawns pi, sends first prompt, returns session id. |
+| `GET /api/sessions` | All sessions: id, name, type, checkout, status (`idle` / `streaming` / `blocked-on-dialog` / `tui-live` / `stopped` / `closed`), last activity. |
+| `POST /api/sessions` | Create: `{type, name?, message}`. Mints a worktree (§2.2), spawns pi in it, sends first prompt, returns session id. |
 | `GET /api/sessions/:id/history` | Snapshot of the session's entries (for initial render), plus the current cursor (`leafId` / last entry id) and any currently pending dialog. |
 | `POST /api/sessions/:id/message` | `{message, behavior?: "steer"\|"followUp"}`. Respawns pi first if the session is `stopped`/`closed` (§5.3.3). `behavior` is required when the session is streaming. |
 | `POST /api/sessions/:id/abort` | Abort the current run. |
@@ -249,9 +258,9 @@ The server exposes a JSON REST API plus one SSE stream per session. Exact paths 
 
 ### 8.2 v1 UI scope
 
-**Session list** (home): all sessions across checkouts showing name, type, checkout, status (`idle` / `streaming` / `blocked-on-dialog` — the last MUST be visually loud, §10.3), and last activity; actions: open, close, new session.
+**Session list** (home): all sessions showing name, type, checkout (the minted worktree), status (`idle` / `streaming` / `blocked-on-dialog` / `tui-live` — blocked MUST be visually loud, §10.3), and last activity; actions: open, close, new session.
 
-**Launch flow**: choose session type (from config) + target checkout (from enumeration) + optional display name + first message.
+**Launch flow**: choose session type (from config) + optional display name + first message; gibson mints the worktree (§2.2).
 
 **Chat view**:
 - Markdown-rendered user and assistant messages.
@@ -273,11 +282,11 @@ The server exposes a JSON REST API plus one SSE stream per session. Exact paths 
 
 - a. `gibson` run in a checkout with a valid `gibson.toml` serves the SPA on the configured bind/port.
 - b. Missing/invalid config, occupied port, missing pi binary, or a pi version below 0.82.0 each produce a distinct, clear error.
-- c. Pi 0.82.x starts as verified; a later minor or major version starts with a visible unverified-version warning.
+- c. Pi 0.84.x starts as verified; a later minor or major version starts with a visible unverified-version warning.
 
 ### 9.2 Sessions
 
-- a. Creating a session of a configured type in a chosen checkout spawns exactly one pi process whose cwd is that checkout and whose session file appears under `<checkout>/.gibson/sessions/`.
+- a. Creating a session of a configured type mints a fresh sibling worktree from latest and spawns exactly one pi process whose cwd is that worktree, with the session file under `<launch-checkout>/.gibson/sessions/`.
 - b. Streaming responses render token-by-token; tool calls show live progress; abort stops the run and the UI reflects it.
 - c. Sending while streaming steers (or queues a follow-up when chosen).
 - d. Closing a session terminates its process; reopening/resuming respawns pi with the same session id and full history intact.
@@ -298,11 +307,11 @@ v1 is **done** when an agent (not a human) completes this workflow against a rea
 
 1. Create a scratch grove-style workspace with a git repo checkout, a committed `.gitignore` entry for `.gibson/`, and a `gibson.toml` defining at least one session type whose `extra_args` loads a test extension that calls `ctx.ui.confirm()` before running a tool.
 2. Launch gibson; open the UI in a browser.
-3. Create a session (type + checkout + first message); observe the streamed assistant response.
+3. Create a session (type + first message; gibson mints the worktree); verify the minted sibling exists; observe the streamed assistant response.
 4. Trigger the extension dialog; answer it from the browser; verify the agent proceeds.
 5. While a response streams, open a second browser client; verify it renders identical state via snapshot + cursor replay and receives the remainder of the stream live.
 6. Kill the gibson server; restart it; verify the session lists as `stopped`; send a follow-up message; verify pi respawns and the conversation continues with full context.
-7. Verify the session JSONL file and stderr log exist under `<checkout>/.gibson/`, and that `git status --porcelain` in the checkout is empty.
+7. Verify the session JSONL file and stderr log exist under `<launch-checkout>/.gibson/`, and that `git status --porcelain` is empty in both the launch checkout and the minted worktree.
 
 All seven steps passing proves v1.
 
