@@ -59,7 +59,7 @@ Prior art worth a skim before writing code: pi's experimental first-party `packa
 
 ### 2. Target checkout chosen dynamically at launch
 
-*Question: does a session-type config name its checkout?* The recommendation was a `dir` field per session type (cheap now, avoids schema rework later); alternatives were hardcoding `main` or picking the checkout in the UI at launch. **Chosen: dynamic at launch — diverging from the recommendation.** Session type and target checkout are orthogonal: config defines *how* to run pi, and gibson itself discovers the available checkouts (worktree enumeration is the tool's job, not the config's). This keeps session types reusable across any worktree.
+*Question: does a session-type config name its checkout?* The recommendation was a `dir` field per session type (cheap now, avoids schema rework later); alternatives were hardcoding `main` or picking the checkout in the UI at launch. **Chosen: dynamic at launch — diverging from the recommendation.** Session type and target checkout are orthogonal: config defines *how* to run pi, and gibson itself discovers the available checkouts (worktree enumeration is the tool's job, not the config's). This keeps session types reusable across any worktree. *Superseded 2026-08-09 (see addendum): every managed session now mints a fresh sibling worktree; the orthogonality survives, the picker does not.*
 
 ### 3. Restart story: resume on demand
 
@@ -87,7 +87,7 @@ Prior art worth a skim before writing code: pi's experimental first-party `packa
 
 ### 9. Session data lives inside the worktree it runs in
 
-*Question: where do pi session files and gibson's metadata live?* The recommendation was a workspace-root `.gibson/` (sibling to checkouts, outside every repo). Alternatives: pi's default `~/.pi/agent/sessions/` location, or a hybrid. **Chosen: per-worktree `.gibson/` inside each checkout — diverging from the recommendation.** Each checkout gets its own `.gibson/` (passed as `--session-dir`, plus metadata and logs), so a session is fully self-contained with the worktree it ran in: prune the worktree and its sessions go with it. "List all sessions" becomes: enumerate checkouts, scan each `.gibson/`. No global registry.
+*Question: where do pi session files and gibson's metadata live?* The recommendation was a workspace-root `.gibson/` (sibling to checkouts, outside every repo). Alternatives: pi's default `~/.pi/agent/sessions/` location, or a hybrid. **Chosen: per-worktree `.gibson/` inside each checkout — diverging from the recommendation.** Each checkout gets its own `.gibson/` (passed as `--session-dir`, plus metadata and logs), so a session is fully self-contained with the worktree it ran in: prune the worktree and its sessions go with it. "List all sessions" becomes: enumerate checkouts, scan each `.gibson/`. No global registry. *Superseded 2026-08-09 (see addendum): storage is now central in the launch checkout — worktrees became ephemeral, so transcripts must outlive them.*
 
 ### 10. `.gibson/` ignored via a committed `.gitignore` entry
 
@@ -118,3 +118,69 @@ Prior art worth a skim before writing code: pi's experimental first-party `packa
 - **Workspace-root `.gibson/` storage** — recommended, declined in favor of per-worktree self-containment (see #9).
 - **Hybrid storage** (pi files in default location, gibson registry elsewhere) — rejected outright as the worst of both.
 - **WebSocket or dual transport** — rejected for v1; nothing needs bidirectional (see #7).
+
+---
+
+## Addendum — the 2026-08-09 re-path
+
+A second design interview, run after M1 consolidated. The trigger was a felt problem:
+the project seemed stuck, far from anything usable, and over-engineered. The diagnosis
+that survived scrutiny: **the foundation was good; the road was wrong.** M0/M1's core
+(RPC framing, process ownership, locked registry, fakepi test bed) is load-bearing for
+any version of the product — but the M2–M7 forecast front-loaded multi-client transport
+correctness before any daily-usable surface, and the daily-use path actually wanted
+first (launching real TUI sessions) appeared nowhere in the plan. M2–M7 were retired
+and replaced by N1–N3 in MILESTONES.md.
+
+### The decisions
+
+1. **Go, reaffirmed.** TypeScript-with-pi-SDK was considered seriously a second time
+   (one language end-to-end, shared wire types) and rejected again: it discards the
+   proven M1 core, and SDK coupling binds tighter to pi's churn than the documented
+   RPC protocol — the recorded top maintenance risk.
+2. **A session is a unit of work that owns a place** (supersedes decision #2). Every
+   managed session mints a fresh sibling worktree, branched from latest (fetch the
+   remote default's head; local fallback offline), via native `git worktree add`
+   following grove's conventions — no runtime grove dependency. Costs accepted
+   knowingly: "help me with my dirty state here" and quick Q&A stay with bare `pi`
+   (gibson is for dispatching work, not chat); worktrees accumulate at session speed
+   (`grove prune` is the broom). Mitigations: grove-cli#124 filed (a `grove create`
+   flag to carry dirty state into a new worktree); the registry keeps `checkout` as an
+   ordinary field, so an `--in <checkout>` escape hatch remains a future edge, not a
+   schema change.
+3. **Storage went central** (supersedes decision #9): `<launch-checkout>/.gibson/`,
+   i.e. `main/.gibson/` in practice. Worktrees became ephemeral, so transcripts must
+   outlive them. Chosen over the workspace root ("start with main, figure it out from
+   there") with a portability guardrail making the location cheap to change: no
+   absolute paths in the registry, storage root derived at one code seam. Accepted
+   risk, held consciously: `git clean -fdx` in `main` destroys transcripts; the
+   workspace root remains the likely eventual home.
+4. **The path: N1 → N2 → N3**, shaped for interleaved use and learning. N1 is a naive
+   `gibson new` (mint, register, exec the pi TUI) whose proof is codified as a
+   standing CI gate so later work can never silently break the daily driver. N2 is the
+   web, read-first: the JSONL file reader and read-only transcript UI land before the
+   interactive RPC core and dialogs — the file-read path is permanent infrastructure
+   (non-live sessions can never be read over RPC), and the streaming layer lands into
+   a renderer already proven by daily reading. N3 wraps up the CLI (`list`/`open`)
+   with real usage knowledge. The v1 horizon (multi-client equal peers, gapless
+   replay, restart resilience, full rendering) stays in SPEC.md but is re-planned
+   after N3 — nothing is built speculatively for it.
+5. **SSE + REST, reaffirmed** over a casually floated WebSocket: the original
+   rationale held on re-examination (curl-debuggable actions, entry-id cursors map to
+   `Last-Event-ID` when replay matters later, nothing bidirectional needed).
+6. **Kept deliberately:** PROCESS.md and its gates (the process shipped M1 cleanly —
+   the complaint was the path, not the process); `gibson run` as-shipped; no rename of
+   the server concept. The verified pi line moved to 0.84.x.
+
+### Dead ends of the re-path session
+
+- **Always-worktree with a checkout picker** (launch-time choice of existing checkout
+  vs. fresh mint) — recommended, declined: the picker reintroduces a decision at every
+  launch to serve cases (`--in main`, wiki editing) that bare `pi` or a future edge
+  covers better.
+- **Interleaving N1/N2 chunks across milestones** — considered for faster mutual
+  learning; resolved instead by re-ordering N2 read-first, which captures the benefit
+  without dissolving the milestone checkpoints.
+- **Shelling out to `grove create` for minting** — deferred, not rejected: native git
+  keeps the launch path dependency-free; revisit if grove-cli#124 lands and
+  dirty-carry becomes wanted in gibson.
