@@ -102,6 +102,9 @@ func collectApplicationCommands(command *cobra.Command) []string {
 }
 
 func executeCommand(command *cobra.Command, args ...string) (string, error) {
+	if args == nil {
+		args = []string{}
+	}
 	var output bytes.Buffer
 	command.SetOut(&output)
 	command.SetErr(&output)
