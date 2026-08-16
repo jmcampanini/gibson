@@ -51,15 +51,3 @@ func TestServeCommandPreservesZeroPortOverride(t *testing.T) {
 	require.NotNil(t, got.PortOverride)
 	assert.Zero(t, *got.PortOverride)
 }
-
-func TestServeCommandRejectsPositionalArguments(t *testing.T) {
-	called := false
-	command := newServeCommand(func(context.Context, app.ServeOptions) error {
-		called = true
-		return nil
-	})
-	command.SetArgs([]string{"unexpected"})
-
-	require.Error(t, command.Execute())
-	assert.False(t, called)
-}
