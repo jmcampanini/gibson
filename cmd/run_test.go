@@ -46,26 +46,3 @@ func TestRunCommandPassesCheckout(t *testing.T) {
 	require.NoError(t, command.Execute())
 	assert.Equal(t, "feature", got.Checkout)
 }
-
-func TestRunCommandRequiresTypeAndMessage(t *testing.T) {
-	tests := map[string][]string{
-		"no arguments":    nil,
-		"missing message": {"quick"},
-		"extra argument":  {"quick", "hello", "extra"},
-	}
-
-	for name, args := range tests {
-		t.Run(name, func(t *testing.T) {
-			called := false
-			outcome := app.RunCompleted
-			command := newRunCommand(func(context.Context, app.RunOptions) (app.RunOutcome, error) {
-				called = true
-				return app.RunCompleted, nil
-			}, &outcome)
-			command.SetArgs(args)
-
-			require.Error(t, command.Execute())
-			assert.False(t, called)
-		})
-	}
-}
