@@ -105,5 +105,5 @@ Human proof: Javier runs `gibson new` against real pi and works in the TUI.
 ## 10. Explicitly out of scope
 
 `gibson list` / `gibson open` (N3); any HTTP or web change (N2); worktree cleanup or
-pruning automation; carrying dirty state into minted worktrees (grove-cli#124); the
+pruning automation; carrying dirty state into minted worktrees (grove#124); the
 `--in <checkout>` escape hatch; multi-session orchestration.

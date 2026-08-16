@@ -415,7 +415,7 @@ confidence unavailable below, rather than duplicating lower-layer assertion matr
   `gibson.toml` via `extra_args = ["-e", "<abs path>"]`; used by N2 and the §9.5
   horizon workflow.
 - Test style: testify `require`/`assert`, table tests, `_test.go` next to code
-  (grove-cli idiom). No mocking frameworks; fakes and real subprocesses only.
+  (grove idiom). No mocking frameworks; fakes and real subprocesses only.
 
 ## 10. Required remaining-milestone plan template
 

@@ -44,7 +44,7 @@ The architecture follows the convergent pattern of OpenCode, Happy Coder, the Cl
 
 ### 2.1 Workspace layout
 
-Gibson targets a grove-style workspace (as managed by grove-cli):
+Gibson targets a grove-style workspace (as managed by grove):
 
 ```
 ~/Code/<host>/<org-or-owner>/<repo>/     ← workspace root
@@ -62,7 +62,7 @@ Gibson targets a grove-style workspace (as managed by grove-cli):
 
 - 2.2.1 Every new managed session (`gibson new`, web launch) mints a fresh sibling worktree; the launch flow never offers an existing checkout in v1. (M1's one-shot `gibson run` keeps its shipped checkout-targeting behavior.) Session type and worktree remain orthogonal: config defines *how* to run pi, minting defines *where*. Session-type config MUST NOT pin a checkout.
 - 2.2.2 The base of a minted worktree is **latest**: fetch the remote default branch and branch from its head; fall back to the local default-branch head when offline or remote-less.
-- 2.2.3 Minting is native git (`git worktree add ../wt-<slug> -b <slug>`), following grove-cli's visible conventions (a `wt-`-prefixed sibling directory). Gibson MUST NOT require the grove binary at runtime. The slug derives from the session name (or the generated session id when unnamed), deduplicated on collision.
+- 2.2.3 Minting is native git (`git worktree add ../wt-<slug> -b <slug>`), following grove's visible conventions (a `wt-`-prefixed sibling directory). Gibson MUST NOT require the grove binary at runtime. The slug derives from the session name (or the generated session id when unnamed), deduplicated on collision.
 - 2.2.4 Gibson MUST still enumerate existing checkouts itself (via `git worktree list` from the launch checkout) for listing and display, never from config.
 - 2.2.5 Worktree cleanup is not gibson's job in v1 (`grove prune` / `git worktree remove`); session data survives pruning (§4.1.3).
 

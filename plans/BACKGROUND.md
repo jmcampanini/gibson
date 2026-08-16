@@ -55,7 +55,7 @@ Prior art worth a skim before writing code: pi's experimental first-party `packa
 
 ### 1. One server per workspace, at the workspace root
 
-*Question: what does one gibson instance govern?* Options: the grove-style workspace root (`~/Code/github.com/org/repo/` with `main` and worktrees as sibling checkouts), a single checkout, or just "wherever you run it." The opening brief had said both "one place, one project" and "the grove layout is how I like to keep these," which pulled in different directions. **Chosen: workspace root** (also the recommendation) — one server governs a repo's whole family of checkouts, matching the grove-cli mental model.
+*Question: what does one gibson instance govern?* Options: the grove-style workspace root (`~/Code/github.com/org/repo/` with `main` and worktrees as sibling checkouts), a single checkout, or just "wherever you run it." The opening brief had said both "one place, one project" and "the grove layout is how I like to keep these," which pulled in different directions. **Chosen: workspace root** (also the recommendation) — one server governs a repo's whole family of checkouts, matching the grove mental model.
 
 ### 2. Target checkout chosen dynamically at launch
 
@@ -75,7 +75,7 @@ Prior art worth a skim before writing code: pi's experimental first-party `packa
 
 ### 6. Config: a single `gibson.toml`, committed to the repository
 
-*Question: adopt grove-cli's convention wholesale or simplify?* Exploration of grove-cli established the local convention: TOML, layered discovery (XDG → ancestors → git root → worktree → cwd). The recommendation was to mirror grove exactly and keep config out of the versioned repo. **Chosen: a single file, and checked into the repo — diverging from the recommendation on both counts.** No layering in v1; and because the file is committed, it exists at every checkout's root and travels with the repo. Consequence adopted with it: gibson is *launched from inside a checkout* (typically `main/`), reads that checkout's `gibson.toml`, and derives the workspace root as the parent directory.
+*Question: adopt grove's convention wholesale or simplify?* Exploration of grove established the local convention: TOML, layered discovery (XDG → ancestors → git root → worktree → cwd). The recommendation was to mirror grove exactly and keep config out of the versioned repo. **Chosen: a single file, and checked into the repo — diverging from the recommendation on both counts.** No layering in v1; and because the file is committed, it exists at every checkout's root and travels with the repo. Consequence adopted with it: gibson is *launched from inside a checkout* (typically `main/`), reads that checkout's `gibson.toml`, and derives the workspace root as the parent directory.
 
 ### 7. Transport: SSE for events + REST for actions
 
@@ -144,7 +144,7 @@ and replaced by N1–N3 in MILESTONES.md.
    following grove's conventions — no runtime grove dependency. Costs accepted
    knowingly: "help me with my dirty state here" and quick Q&A stay with bare `pi`
    (gibson is for dispatching work, not chat); worktrees accumulate at session speed
-   (`grove prune` is the broom). Mitigations: grove-cli#124 filed (a `grove create`
+   (`grove prune` is the broom). Mitigations: grove#124 filed (a `grove create`
    flag to carry dirty state into a new worktree); the registry keeps `checkout` as an
    ordinary field, so an `--in <checkout>` escape hatch remains a future edge, not a
    schema change.
@@ -182,5 +182,5 @@ and replaced by N1–N3 in MILESTONES.md.
   learning; resolved instead by re-ordering N2 read-first, which captures the benefit
   without dissolving the milestone checkpoints.
 - **Shelling out to `grove create` for minting** — deferred, not rejected: native git
-  keeps the launch path dependency-free; revisit if grove-cli#124 lands and
+  keeps the launch path dependency-free; revisit if grove#124 lands and
   dirty-carry becomes wanted in gibson.
