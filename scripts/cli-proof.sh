@@ -21,6 +21,8 @@ printf '%s\n' "$serve_help" | grep -Fq -- '--dev'
 run_help="$($gibson run --help)"
 printf '%s\n' "$run_help" | grep -Fq -- 'run <type> <message> [--checkout <name>]'
 printf '%s\n' "$run_help" | grep -Fq -- '--checkout'
+completion_fish="$($gibson completion fish)"
+test -n "$completion_fish"
 
 if error_output="$($gibson serve unexpected 2>&1)"; then
 	echo "expected positional arguments to fail" >&2
@@ -81,6 +83,31 @@ for invalid in '../outside' missing not-git; do
 	test "$before_main" = "$(find .gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')"
 	test "$before_target" = "$(find ../wt-x/.gibson/sessions -type f -name '*.jsonl' | wc -l | tr -d ' ')"
 done
+
+cp -R .gibson "$sandbox/rejected-main-gibson"
+cp -R ../wt-x/.gibson "$sandbox/rejected-wt-x-gibson"
+rejected_main_head="$(git rev-parse HEAD)"
+rejected_wt_x_head="$(git -C ../wt-x rev-parse HEAD)"
+if $gibson run quick rejected extra >"$sandbox/rejected.output" 2>&1; then
+	echo "expected extra run operand to fail" >&2
+	exit 1
+else
+	rejected_rc=$?
+fi
+test "$rejected_rc" -eq 1
+test "$(wc -l <"$sandbox/rejected.output" | tr -d ' ')" -eq 1
+test "$(awk 'END { print NR }' "$sandbox/rejected.output")" -eq 1
+IFS= read -r rejected_output <"$sandbox/rejected.output"
+case "$rejected_output" in 'gibson: error: '*) ;; *) echo "rejected operand error missing process prefix" >&2; exit 1;; esac
+diff -r "$sandbox/rejected-main-gibson" .gibson
+diff -r "$sandbox/rejected-wt-x-gibson" ../wt-x/.gibson
+rejected_main_status="$(git status --porcelain)" || { echo "main checkout status failed" >&2; exit 1; }
+rejected_wt_x_status="$(git -C ../wt-x status --porcelain)" || { echo "wt-x checkout status failed" >&2; exit 1; }
+test -z "$rejected_main_status"
+test -z "$rejected_wt_x_status"
+test "$rejected_main_head" = "$(git rev-parse HEAD)"
+test "$rejected_wt_x_head" = "$(git -C ../wt-x rev-parse HEAD)"
+printf '%s\n' 'REJECTED_OPERAND_STATE=unchanged'
 
 $gibson run quick 'Concurrent A' --checkout wt-x >"$sandbox/concurrent-a.stdout" 2>"$sandbox/concurrent-a.stderr" & concurrent_a=$!
 $gibson run quick 'Concurrent B' --checkout wt-x >"$sandbox/concurrent-b.stdout" 2>"$sandbox/concurrent-b.stderr" & concurrent_b=$!
