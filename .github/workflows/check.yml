@@ -1,0 +1,50 @@
+name: Check
+
+on:
+  push:
+    branches: [main, feature/m0]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Record working tree state
+        run: git status --porcelain > "$RUNNER_TEMP/porcelain-before"
+
+      - name: Check
+        run: make check
+
+      - name: Verify check left the working tree unchanged
+        run: |
+          git status --porcelain > "$RUNNER_TEMP/porcelain-after"
+          diff -u "$RUNNER_TEMP/porcelain-before" "$RUNNER_TEMP/porcelain-after"
