@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"charm.land/log/v2"
@@ -421,20 +422,22 @@ func TestRPCCommandFailuresAndTimeouts(t *testing.T) {
 	})
 
 	t.Run("caller deadline wins", func(t *testing.T) {
-		input, source := io.Pipe()
-		client := newRPCClient(input, &synchronizedBuffer{}, nil)
-		client.commandTimeout = time.Second
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		defer cancel()
+		synctest.Test(t, func(t *testing.T) {
+			input, source := io.Pipe()
+			client := newRPCClient(input, &synchronizedBuffer{}, nil)
+			client.commandTimeout = time.Second
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
 
-		_, err := client.command(ctx, "get_state", nil)
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-		assert.NotErrorIs(t, err, ErrCommandTimeout)
+			_, err := client.command(ctx, "get_state", nil)
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.NotErrorIs(t, err, ErrCommandTimeout)
 
-		client.close()
-		require.NoError(t, source.Close())
-		waitFor(t, client.pumpDone, "RPC pump")
-		waitFor(t, client.writerDone, "RPC writer")
+			client.close()
+			require.NoError(t, source.Close())
+			waitFor(t, client.pumpDone, "RPC pump")
+			waitFor(t, client.writerDone, "RPC writer")
+		})
 	})
 }
 
